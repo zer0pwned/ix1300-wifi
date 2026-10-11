@@ -422,6 +422,10 @@ D4 (0x50 bytes): 32 bytes of parameters, then a 48-byte window descriptor.
 - Parameters: `00 03 01 01 88 00 C1 80 80 80 80 80 80 00`, 17 zero bytes,
   `30`. Byte 6 = `C1` selects the automatic color mode. Byte 1 = 3 is the
   only tested value.
+- Parameter byte 4: double-feed detection [NV]. `88` = on (the value in
+  all tests). `00` = off. The vendor software sends `00` for the front slot
+  and when the user turns the detection off. The scanner does not store
+  this value: the host sends it in each job.
 - Window descriptor: +1 = `10` (JPEG); +2 BE16 X resolution; +4 BE16 Y
   resolution; +6 = `05` (color) or `02` (gray [NV]); +7 = `82` at 300 dpi,
   else `81`; +8 = `0D` at 300 dpi, `0A` at 600 dpi, else `05`; +10 BE32
@@ -529,6 +533,27 @@ last sheet: a set exit bit then shows a probable jam.
 
 A skewed long receipt can jam or drift. Move the paper guides against the
 receipt edges.
+
+### 8.9 Auto power-off time (E6) [NV]
+
+The vendor software reads and sets the auto power-off time with a Port1
+command. It needs a reserve. No hardware test confirmed this layout.
+
+| Step | CDB | Data |
+|---|---|---|
+| Get | `E6 00 01 00 00 00 00 04` | 4 bytes in: `CC BB 00 00` |
+| Set | `E6 00 00 00 00 04 00 00` | 4 bytes out: `CC BB 00 00` |
+
+- `CC` bits 0-6: the time in 15-minute units (`01` = 15 min to `7E` =
+  1890 min). `10` = 240 min, the factory value. `7F` = a special 3-minute
+  value.
+- `CC` bit 7 = 1: auto power-off is off. The vendor software keeps the time
+  bits.
+- `BB`: normally `1E`. Probably the warning time before the power-off in
+  10 s units (`1E` = 5 min). The service writes `BB` back as it reads it.
+- The scanner probably keeps the value after a power-off.
+- Only a job start (D5) starts the idle time again. A keepalive does not
+  [HW for the keepalive].
 
 ## 9. Sides and page order [HW]
 
