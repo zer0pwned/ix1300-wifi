@@ -1,5 +1,5 @@
-"""Command line: ix1300 discover | status | scan | serve | retry | usb-register-host | wifi-register-host |
-usb-wifi-setup."""
+"""Command line: ix1300 discover | status | scan | settings | serve | retry | usb-register-host |
+wifi-register-host | usb-wifi-setup."""
 import argparse
 import getpass
 import logging
@@ -9,6 +9,7 @@ import sys
 from . import __version__
 from . import config as config_mod
 from . import outputs as outputs_mod
+from . import settings as settings_mod
 from .daemon import Job, Service, host_address, locate, make_scanner, occupied_text, short_error
 from .jobs import FAILED, UNSENT, list_jobs
 from .pipeline import have_pillow, tesseract_path, write_file
@@ -88,6 +89,7 @@ def cmd_scan(args):
     except ReserveError as e:
         print("error: %s" % (occupied_text(sc) if e.result == -4 else e), file=sys.stderr)
         return 2
+    settings_mod.apply_power_off(sc, cfg.scanner.get("power_off_minutes"))
     svc = job = None
     result, error = None, None
     try:                                          # from here: always release the scanner
@@ -179,6 +181,44 @@ def _finish_scan(cfg, svc, job, result, error, args):
     if jd.m.get("save_error") or any(not st.get("ok") for st in jd.m.get("outputs", {}).values()):
         return 4
     return 0 if normal and not job.failures else 5
+
+
+def cmd_settings(args):
+    """Read (--show) or set (--power-off MINUTES) the auto power-off time of the scanner [NV].
+    Exit codes: 0 OK, 1 scanner error, 2 bad value or no reserve."""
+    cfg = _load(args)
+    minutes = None
+    if args.power_off is not None:
+        try:
+            minutes = settings_mod.parse_power_off(args.power_off, "--power-off")
+        except ValueError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 2
+    host_ip, host_mac = host_address(cfg)
+    dev = locate(cfg, host_ip, host_mac)
+    sc = make_scanner(cfg, host_ip, host_mac, dev)
+    try:
+        sc.reserve()
+    except ReserveError as e:
+        print("error: %s" % (occupied_text(sc) if e.result == -4 else e), file=sys.stderr)
+        return 2
+    try:
+        if minutes is None:
+            print("auto power-off  %s" % settings_mod.describe_power_off(*settings_mod.read_power_off(sc)))
+        else:
+            r = settings_mod.sync_power_off(sc, minutes)
+            print("auto power-off  %s%s" % (settings_mod.describe_power_off(*r.after),
+                                            "" if r.written else " (no change)"))
+    except (OSError, IxError) as e:
+        print("error: %s" % short_error(e), file=sys.stderr)
+        return 1
+    finally:
+        sc.close()
+        try:
+            sc.release()
+        except Exception as e:
+            log.warning("release failed: %s", e)
+    return 0
 
 
 def cmd_serve(args):
@@ -329,6 +369,13 @@ def main(argv=None):
     s.add_argument("--raw", help="also write the JPEG sides into this directory")
     s.add_argument("--send", action="store_true", help="also send the PDF to the outputs of the profile")
     s.set_defaults(fn=cmd_scan)
+
+    s = sub.add_parser("settings", help="read or set the auto power-off time of the scanner")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--show", action="store_true", help="read and show the auto power-off time")
+    g.add_argument("--power-off", metavar="MINUTES",
+                   help="set the auto power-off time: 0 = off, else 15..1890 in steps of 15")
+    s.set_defaults(fn=cmd_settings)
 
     s = sub.add_parser("serve", help="run the scan button service")
     s.set_defaults(fn=cmd_serve)

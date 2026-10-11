@@ -487,6 +487,7 @@ class ScanSettings:
     length: int = AUTO_LENGTH         # 1/1200 inch
     path: str = "top"                 # "top" (chute) or "front" (front slot, return path)
     long_page: bool = False           # long page mode: up to LONG_MAX_MM, mutual READs, top chute only
+    double_feed: bool = True          # D4 byte 4: 0x88 = detection on, 0x00 = off [NV]
 
     def __post_init__(self):
         if self.path not in PATHS:
@@ -526,6 +527,8 @@ class ScanSettings:
             params[6] = 0x80             # fixed colour mode (not verified on hardware)
         if self.long_page:
             params[13] = LONG_D4_MUTUAL      # mutual transfer [NV]
+        if not self.double_feed:
+            params[4] = 0x00             # no double-feed detection (not verified on hardware)
         desc = bytearray(48)
         desc[1] = 0x10                   # JPEG
         struct.pack_into(">HH", desc, 2, self.dpi, self.dpi)

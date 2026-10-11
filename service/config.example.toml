@@ -57,6 +57,11 @@ auto_register = false
 # After a reconnect or a power-on, the service tries again at least each retry_max s.
 retry_min = 2
 retry_max = 10
+# Auto power-off time of the scanner in minutes (not verified on the scanner).
+# Empty: the service does not change the scanner value. 0: auto power-off off.
+# 15..1890 in steps of 15 (factory value: 240). After each reserve, the service reads
+# the value and writes it only when it is different. An error gives a warning only.
+power_off_minutes = ""
 
 [service]
 # true: read the paper sensors before a job. With no paper in the chute and no sheet in
@@ -193,6 +198,7 @@ length = "auto"               # "auto" (up to 895 mm), "long" (up to 3,000 mm) o
 # deskew = false              # straighten the page (needs Pillow)
 crop = "auto"                 # cut the page to the paper: auto (receipts only), true, false
 receipt = "auto"              # auto, yes or no
+double_feed = true            # double-feed detection (false: no check; not verified on the scanner)
 outputs = ["paperless"]       # empty: all outputs
 
 [profiles.receipt]

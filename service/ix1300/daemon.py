@@ -23,6 +23,7 @@ import time
 
 from . import outputs as outputs_mod
 from . import register as register_mod
+from . import settings as settings_mod
 from .config import ConfigError
 from .jobs import FAILED, JOBS, PDF, UNSENT, JobDir, free_mb, keep_raw, list_jobs
 from .net import SystemNet, local_ip_for, mac_for_ip, parse_mac
@@ -312,6 +313,7 @@ class Service:
             self.dedup_reset = False
         self.last_error = None
         log.info("reserved scanner %s", self.scanner.ip)
+        settings_mod.apply_power_off(self.scanner, self.cfg.scanner.get("power_off_minutes"))
         return True
 
     def _reserve_scanner(self):

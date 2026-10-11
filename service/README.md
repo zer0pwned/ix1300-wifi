@@ -95,6 +95,13 @@ docker compose run --rm -v $PWD/data:/out ix1300 scan --profile default --out /o
 `scan --send` also sends the PDF to the outputs of the profile. `scan --raw DIR` also writes the JPEG sides. `scan` gives the exit code 5 if an error stopped the scan; the PDF then has the complete sheets before the error. `scan` uses the same job directories as the service (`service.work_dir`, section 5). If the PDF, the file or an output fails, or if `deliver_partial = false` stops the job, the sheets stay in `work_dir/failed` (or the PDF in `work_dir/unsent`). `scan` shows the directory. Use `retry` or `retry --failed` to continue.
 Stop the service before you use `scan`: the scanner accepts one host only.
 
+`settings --show` reads the auto power-off time from the scanner. `settings --power-off MINUTES` sets it (`0` = off, else 15 to 1890 in steps of 15) and reads it back. Stop the service before you use `settings`.
+
+```
+docker compose run --rm ix1300 settings --show
+docker compose run --rm ix1300 settings --power-off 240
+```
+
 `retry` sends the jobs in `work_dir/unsent` again (all failed outputs, also after a permanent error). `retry --failed` first makes the PDF again from the sheets in `work_dir/failed`. `retry --list` shows the jobs.
 
 ```
@@ -108,6 +115,8 @@ Build arguments (Dockerfile): `WITH_TESSERACT=0` makes a smaller image without r
 
 The file is TOML (`config.example.toml` has all values and comments). A JSON file is also possible. The service checks all values before it starts. It stops with "config error" for an unknown section or key (for example `[pipline]`), a wrong type, a fraction where an integer is necessary (`dpi = 300.9`), or a value out of range.
 Environment variables change single values: `IX1300_<SECTION>__<KEY>`, for example `IX1300_SCANNER__IP=192.0.2.212` or `IX1300_OUTPUTS__PAPERLESS__TOKEN=abc`. The type of the setting decides how the service reads the value: numbers, `true`/`false`, lists (`[1,2]`) and tables as JSON. Tokens, URLs, addresses and header values stay text exactly as given (also `123e40` or `null`). `IX1300_<SECTION>__<KEY>_FILE=/path` reads the value from a file, for example a Docker secret.
+
+`scanner.power_off_minutes` sets the auto power-off time of the scanner [NV]. Empty (default): the service does not change the scanner value. `0`: the scanner does not turn off. `15` to `1890` in steps of 15 minutes: the scanner turns off after this time without a job (factory value: 240). After each reserve, the service reads the value and writes it only when it is different. Then it reads the value again to make sure. If an error occurs, the service logs a warning and continues. Only a scan job starts the idle time again. The keepalive packets do not.
 
 Limits for bad or slow data from the network (section `[scanner]`): `frame_timeout` (120 s for one reply), `side_timeout` (600 s for one side), `max_side_mb` (64 MB for one side), `data_timeout` (60 s without image data). A reply can be at most the requested length plus 64 bytes.
 
@@ -127,6 +136,7 @@ Limits for bad or slow data from the network (section `[scanner]`): `frame_timeo
 | `rotate` | `auto`, 0, 90, 180, 270 (empty: `pipeline.rotate`) | empty |
 | `deskew`, `ocr` | `true`/`false` (empty: the pipeline value) | empty |
 | `receipt` | `auto`, `yes`, `no` | `auto` |
+| `double_feed` | double-feed detection: `true` (on), `false` (off, for example for envelopes or sheets with a label) [NV] | `true` |
 | `outputs` | names of outputs. Empty list: all outputs | `[]` |
 
 `service.short_press_profile` and `service.long_press_profile` select the profile for each press. `service.front_slot_profile` (empty by default) selects the profile for a front slot job.
@@ -317,5 +327,6 @@ python3 -m unittest discover -s service/tests
 - Memory use on the Pi Zero after these changes (the test measures Python memory with the emulator: 6 MB peak for a 22-side, 13.8 MB job).
 - Host ID registration over Wi-Fi (`wifi-register-host`, `scanner.auto_register`): the mode-2 reserve with an unregistered ID, the DC commands, and their replies come from the vendor software only. The emulator decides some details (for example: DC op 0 needs a clear first when an ID is registered).
 - Port1 and Port2 over TLS (the scanner shows TLS ports in some modes). The service does not implement TLS.
+- The auto power-off setting (`scanner.power_off_minutes`, `settings` command, PROTOCOL.md 8.9) and `double_feed = false` (PROTOCOL.md 8.2). The command layouts come from the vendor software, not from a hardware test.
 - The trigger codes other than the scan button (power on 0x30, power off, release requests).
 - The JPEG files with the fixed height still contain the padded image data. libjpeg shows the warning "extraneous bytes before marker 0xd9". Ghostscript shows these pages correctly (tested with the sample receipts). Other PDF viewers were not tested.
