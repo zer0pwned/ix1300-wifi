@@ -122,5 +122,47 @@ class DamagedRecoveryTest(unittest.TestCase):
                               if n.endswith(".jpg")]), 2)            # the originals stay
 
 
+STOP_SCRIPT = r"""
+import os, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+import support
+from ix1300 import cli, daemon as D
+
+started = threading.Event()
+
+class Fake:
+    def __init__(self, cfg):
+        import concurrent.futures
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    def run_forever(self):
+        self.executor.submit(lambda: (started.set(), time.sleep(30)))
+        started.wait()
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        return 0
+
+cli.Service = Fake
+cli._load = lambda args: type("Cfg", (), {"host_id": "x"})()
+sys.exit(cli.main(["serve"]))
+"""
+
+
+class BoundedStopTest(unittest.TestCase):
+    """Finding C: a page task that still runs does not keep the process alive after the stop."""
+
+    def test_serve_exits_with_a_running_page_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = os.path.join(tmp, "stop.py")
+            with open(script, "w") as fh:
+                fh.write(STOP_SCRIPT)
+            t0 = time.monotonic()
+            r = subprocess.run([sys.executable, script, support.HERE], capture_output=True, text=True, timeout=60)
+            took = time.monotonic() - t0
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(took, 15, "the process waited for the page task")
+
+    def test_exit_code_without_running_threads(self):
+        self.assertEqual(cli.exit_after_stop(3), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

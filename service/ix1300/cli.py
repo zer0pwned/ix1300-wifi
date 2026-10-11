@@ -5,6 +5,8 @@ import getpass
 import logging
 import os
 import sys
+import threading
+import time
 
 from . import __version__
 from . import config as config_mod
@@ -258,7 +260,35 @@ def cmd_serve(args):
     if cfg.host_id is None:
         print("error: scanner.host_id is not set", file=sys.stderr)
         return 2
-    return Service(cfg).run_forever()
+    return exit_after_stop(Service(cfg).run_forever())
+
+
+def exit_after_stop(code):
+    """Exit at once if threads of the stopped service still run. Else return CODE.
+
+    At its exit, Python waits for the page threads (ThreadPoolExecutor), and a
+    page task can run for tesseract_timeout or longer. Service.stop() keeps to
+    stop_timeout and leaves each job on disk (manifest with fsync), and the next
+    start continues it. Thus os._exit() loses no job. In the container, this
+    process has PID 1: its exit also stops the tesseract and djpeg processes.
+    """
+    end = time.monotonic() + 1.0                  # idle page threads end in a short time
+    busy = []
+    for t in threading.enumerate():
+        if t is not threading.current_thread() and not t.daemon:
+            t.join(max(0.0, end - time.monotonic()))
+            if t.is_alive():
+                busy.append(t.name)
+    if not busy:
+        return code
+    log.warning("threads still run after the stop (%s): the next start continues their jobs", ", ".join(busy))
+    logging.shutdown()
+    for fh in (sys.stdout, sys.stderr):
+        try:
+            fh.flush()
+        except (OSError, ValueError):
+            pass
+    os._exit(code)
 
 
 def cmd_retry(args):
