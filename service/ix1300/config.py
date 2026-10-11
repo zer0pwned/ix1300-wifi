@@ -61,6 +61,7 @@ DEFAULTS = {
         "retry_min": 2.0,
         "retry_max": 10.0,                # longest wait between reserve attempts (seconds)
         "yield_on_request": True,
+        "auto_register": False,           # -6: register host_id over Wi-Fi (at most once an hour) [NV]
     },
     "service": {
         "short_press_profile": "default",
