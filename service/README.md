@@ -389,8 +389,9 @@ have been ejected without a scan`. Scan the other sheets again.
 
 The service waits until the paper path is empty (at most 120 s, and not after
 the stop deadline). If the stop takes longer than `stop_timeout` (default
-60 s), the job stays on disk, and the next start continues it. Keep
-`stop_timeout` less than `stop_grace_period` in `docker-compose.yml`.
+60 s), the job stays on disk, and the next start continues it. The process
+then exits at once, also if a page task (for example tesseract) still runs.
+Keep `stop_timeout` less than `stop_grace_period` in `docker-compose.yml`.
 
 ### 4.9 Auto power-off
 
@@ -710,6 +711,10 @@ with the record:
   `work_dir/failed` after the delivery.
 - One side without the other side stays in the folder. The service does not
   remove it. Examine it, and then remove the job folder yourself.
+- If a side in the record is missing or not readable, the PDF has the other
+  pages. The job stays in `work_dir/failed`.
+- If the service cannot continue a job (for example a bad record), it moves
+  the job to `work_dir/failed` and continues with the next job.
 
 Remove old folders in `failed` yourself when you do not need them.
 

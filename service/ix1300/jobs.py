@@ -146,10 +146,12 @@ class JobDir:
             raise
         return names
 
-    def iter_sides(self, indices=None):
+    def iter_sides(self, indices=None, errors=None):
         """Read the sides of the sheets, one sheet at a time. Yield lists of Side (with .path).
 
         INDICES: only these sheets (positions in the manifest).
+        ERRORS: a list. A side file that is missing or not readable goes into it as a text,
+        and the sheet continues without that side. Without ERRORS, the OSError goes up.
         """
         for n, sheet in enumerate(self.m["sheets"]):
             if indices is not None and n not in indices:
@@ -160,8 +162,15 @@ class JobDir:
                 if not d:
                     continue
                 path = os.path.join(self.path, d["file"])
-                with open(path, "rb") as fh:
-                    data = fh.read()
+                try:
+                    with open(path, "rb") as fh:
+                        data = fh.read()
+                except OSError as e:
+                    if errors is None:
+                        raise
+                    errors.append("sheet %d %s side: original %s not readable (%s)"
+                                  % (n + 1, name, d["file"], e.strerror or e))
+                    continue
                 s = Side(sheet=n, side=name, page_id=d.get("page_id", 0), jpeg=data, width=d.get("width", 0),
                          lines=d.get("lines", 0), dpi=d.get("dpi", 300))
                 s.path = path

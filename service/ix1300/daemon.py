@@ -1253,6 +1253,14 @@ class Service:
                     self._queue(self.job_from_dir(jd, kind))
                     queued = True
                     n += 1
+                except Exception as e:
+                    # One damaged job must not stop the recovery of the next jobs.
+                    log.exception("job %s: recovery failed", jd.id)
+                    try:
+                        jd.m["error"] = "recovery failed: %s" % (str(e) or e.__class__.__name__)
+                        self._settle_failed(jd)
+                    except Exception:
+                        log.exception("job %s: cannot move the job to %s", jd.id, FAILED)
                 finally:
                     if not queued:
                         jd.unclaim()
@@ -1281,9 +1289,13 @@ class Service:
         jd.m["error"] = None
         for k in ("saved", "save_error"):        # CLI values of the earlier run
             jd.m.pop(k, None)
-        for sides in jd.iter_sides():
+        damaged = []                             # missing originals: the pages are missing, the job continues
+        for sides in jd.iter_sides(errors=damaged):
             job.sheets += 1
             job.submit(sides)
+        for msg in damaged:
+            log.error("job %s: %s", jd.id, msg)
+        job.failures.extend(damaged)
         return job
 
 
