@@ -182,6 +182,19 @@ class JobDir:
         out.update(self.m.get("orphans") or [])
         return out
 
+    def next_sheet(self):
+        """The 0-based number of the first sheet of a new part (continue scanning).
+
+        The number comes after all side files in the manifest and in the directory,
+        so that a new part never writes over a file of an earlier part.
+        """
+        names = self.listed()
+        try:
+            names.update(os.listdir(self.path))
+        except OSError:
+            pass
+        return max((int(m.group(1)) for m in map(SIDE_FILE.match, names) if m), default=0)
+
     def unlisted(self):
         """Side files in the directory that the manifest does not know."""
         try:

@@ -306,6 +306,8 @@ class WebhookOutput(Output):
         if getattr(doc, "job_id", None):
             fields.append(("job_id", doc.job_id))
         fields.append(("paper_path", getattr(doc, "paper_path", None) or "top"))
+        if getattr(doc, "parts", None):              # continue scanning: more than one part
+            fields.append(("parts", json.dumps(doc.parts)))
         if doc.warnings:
             fields.append(("warnings", json.dumps(doc.warnings)))
         for k, v in (self.cfg.get("fields") or {}).items():

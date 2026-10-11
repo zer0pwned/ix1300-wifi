@@ -78,6 +78,11 @@ long_press_profile = "receipt"
 # Empty: the profile of the press. Else: the name of a profile for all front slot jobs.
 # The front slot takes one sheet at a time and no long paper (a long receipt jams).
 front_slot_profile = ""
+# Continue scanning: more loads of paper into one document. 0 = off. N > 0: after a scan,
+# the document waits N seconds. Load more paper and push the same gesture again within
+# N s to add pages; the time then starts again. A press with the other profile, the end
+# of the time, or a stop sends the document (README, "Continue scanning").
+continue_window = 0
 # Job files: work_dir/jobs (in work), work_dir/unsent (an output failed),
 # work_dir/failed (no PDF, or pages missing), work_dir/raw (keep_raw).
 work_dir = "/data"

@@ -150,6 +150,17 @@ A button press always scans the whole stack: the scanner feeds all sheets in the
 | Short press (push and release) | `service.short_press_profile` |
 | Long press: hold the Scan button until it flashes blue (about 3 s), then release | `service.long_press_profile` (empty: the short press profile) |
 | Front slot: put one sheet into the front slot (chute empty), then a short or long press | `service.front_slot_profile` (empty: the profile of the press) |
+| Continue scanning (`service.continue_window` = N > 0): after a scan, load more paper and push the same gesture again within N s to add pages | The profile of the document that waits |
+
+**Continue scanning:** `service.continue_window` (seconds, default 0 = off) puts more loads of paper into one document, as "Continue scanning" in ScanSnap Home does. When N > 0, the document waits N seconds after each scan. Push the same gesture again within N s to add pages: the service scans the new load and adds its pages after the pages of the earlier loads. The time then starts again. The log shows `continue scanning: part 2 added (3 sheets); delivery in 30 s`. A front slot sheet can also be a part (for example a card between two stacks). Rules:
+
+- "Same gesture" means the same button profile (short press or long press). A press with the other profile first sends the document that waits, then starts a new document.
+- A press with no paper changes nothing: no part, and the time does not start again.
+- The end of the time, or a stop of the service, sends the document.
+- A scan error in a part (paper jam, double feed, lost sheet) sends the document at once. The warning shows the part (for example `part 2: scan stopped after 1 sheets: ...`). With `deliver_partial = false`, an error in a part keeps all sheets of the document in `work_dir/failed`.
+- The document that waits is a normal job directory in `work_dir/jobs`. After a restart (also a crash), the service sends it with the pages of all parts that it has.
+- All parts use the profile of the first part (also a front slot part).
+- The job manifest records each part (`parts`: number, sheets, paper path). The webhook gets the field `parts` (JSON) for a document with two or more parts. `paper_path` is the path of the first part.
 
 **Front slot (return path):** before each job, the service reads the paper sensors (C2) one time. Paper in the chute gives a normal job. An empty chute and paper at the feed sensor gives a front slot job: the service scans the one sheet (both sides), and the sheet comes back out at the front. The log shows the paper path (for example `scan button (short press): profile default, front slot`). The front slot takes one sheet at a time, and no long paper: a receipt longer than an A4 sheet jams. The job manifest, `raw.json`, the webhook (field `paper_path`) and the document data in the manifest record the paper path: `top` or `front`.
 
@@ -183,7 +194,7 @@ The scanner always reads both sides. For a simplex profile, the service keeps th
 
 **Paperless-ngx** (`type = "paperless"`): `POST <url>/api/documents/post_document/` with `Authorization: Token <token>`. If the scan has a warning (for example a probable jam), the title gets `warning_title_suffix` (default " [scan warning]"). Fields: `document`, `title`, `created`, `tags` (`tags`, plus `receipt_tags` for receipts), `correspondent`, `document_type` (or `receipt_correspondent`, `receipt_document_type` for receipts). Use 0 for "not set".
 
-**Webhook** (`type = "webhook"`): multipart POST to `url`. The PDF is in the field `field` (default `file`). Other fields: `title`, `profile`, `pages`, `receipt`, `created`, `job_id`, `paper_path` (`top` for the chute, `front` for the front slot), `warnings`, and the values in `fields`. `headers` adds HTTP headers (for example a token).
+**Webhook** (`type = "webhook"`): multipart POST to `url`. The PDF is in the field `field` (default `file`). Other fields: `title`, `profile`, `pages`, `receipt`, `created`, `job_id`, `paper_path` (`top` for the chute, `front` for the front slot), `parts` (continue scanning, two or more parts), `warnings`, and the values in `fields`. `headers` adds HTTP headers (for example a token).
 
 **Directory** (`type = "directory"`): writes the PDF into `path`. It never replaces a file: the second file gets the name `name-1.pdf`. On a file system without hard links (some network shares), the service makes the file with an exclusive create and then copies the PDF into it. Only a crash during this copy can leave a short file; the job then stays in `work_dir` and the service sends it again. New files get `file_mode` (default `"0600"`), new directories `dir_mode` (default `"0700"`). Use for example `file_mode = "0640"` if other users must read the files.
 
