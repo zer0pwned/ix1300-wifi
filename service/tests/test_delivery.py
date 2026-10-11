@@ -108,7 +108,7 @@ class A10DeliveryTest(DeliveryCase):
     def test_a10_slow_output_does_not_block_the_next_document(self):
         emu = self.emulator()
         cfg = self.config(emu.search_port)
-        cfg.service["max_backlog"] = 1
+        cfg.service["max_backlog"] = 2               # the first document in the slow queue counts
         slow, fast = Gate(), RecordOutput()
         self.addCleanup(slow.release.set)
         svc = self.service(cfg, {"slow": slow, "fast": fast})
@@ -122,7 +122,7 @@ class A10DeliveryTest(DeliveryCase):
         self.assertTrue(sync(svc, emu), "the scan thread does not wait for a press")
         emu.load(Sheet(front="text"))
         emu.press()
-        # The second scan starts (max_backlog = 1) and its PDF goes to the fast output at once.
+        # The second scan starts (max_backlog = 2) and its PDF goes to the fast output at once.
         self.assertTrue(wait_for(lambda: len(fast.docs) == 2, 15), "the next document waits for the slow output")
         self.assertEqual(slow.calls, 1)                           # one document at a time for each output
         slow.release.set()

@@ -75,7 +75,7 @@ DEFAULTS = {
         "log_level": "INFO",
         "deliver_partial": True,
         "min_free_mb": 200,               # no scan if work_dir has less free space
-        "max_backlog": 3,                 # no scan if this number of jobs waits for processing
+        "max_backlog": 3,                 # no scan if this number of jobs waits for processing or delivery
         "stop_timeout": 60.0,             # seconds for a clean stop (Docker: stop_grace_period)
         "stop_scan_wait": 15.0,           # at stop: seconds that a scan can continue before D8
         "retry_interval": 60.0,           # first wait before a new attempt for unsent jobs

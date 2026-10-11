@@ -694,11 +694,16 @@ the scan:
 
 - If `work_dir` has less than `min_free_mb` (200 MB) free, the service does not
   start the scan.
-- If `max_backlog` (3) jobs wait for the PDF work, the service does not start
-  the scan.
+- If `max_backlog` (3) jobs wait for the PDF work or for their first
+  delivery, the service does not start the scan. Thus a slow output stops
+  new scans before too many documents wait in its queue.
 
 The paper then stays in the chute. Correct the cause, and push the button
-again. The documents in the output queues do not count for `max_backlog`.
+again. A scan that started always continues to the end.
+
+The jobs in `work_dir/unsent` do not count for `max_backlog`. At most
+`max_backlog` of them are in the output queues at the same time. The service
+puts the other jobs into the queues later.
 
 ### 7.5 Damaged jobs
 
@@ -916,7 +921,7 @@ Use the default image (with tesseract), or set `rotate = 180` in the profile.
 Make space in `work_dir` (for example old jobs in `failed`), or change
 `min_free_mb`. Push the button again.
 
-**`scan not started: N jobs wait for processing`**
+**`scan not started: N jobs wait for processing or delivery`**
 The PDF work or the outputs are slow. Wait, and push the button again. Change
 `max_backlog` if necessary.
 
@@ -1180,7 +1185,7 @@ in sections 3.3 and 5. The comments in `config.example.toml` give more help.
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `deliver_partial` | `true` | Send the complete sheets before a scan error |
 | `min_free_mb` | 200 | No scan with less free space in `work_dir` (MB) |
-| `max_backlog` | 3 | No scan when this number of jobs waits for the PDF work |
+| `max_backlog` | 3 | No scan when this number of jobs waits for the PDF work or the first delivery |
 | `stop_timeout` | 60 | Seconds for a clean stop. Less than `stop_grace_period` |
 | `stop_scan_wait` | 15 | Seconds that a scan can continue at a stop. Less than `stop_timeout` |
 | `retry_interval` | 60 | First wait (s) before a new attempt for unsent jobs |
