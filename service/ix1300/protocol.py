@@ -158,23 +158,49 @@ def pfu_encode(text):
     return "".join("%03d" % (b + 11 + PFU_KEY[i % 16]) for i, b in enumerate(text.encode())).encode()
 
 
-def recv_exact(sk, n, deadline=None):
-    """Receive N bytes. DEADLINE (time.monotonic) limits the total time, not only each recv."""
+def recv_exact(sk, n, deadline=None, stop=None, tick=0.2):
+    """Receive N bytes. DEADLINE (time.monotonic) limits the total time, not only each recv.
+
+    STOP: a function. While no byte comes, it is examined each TICK seconds; if it gives
+    True, raise Stopped (the frame is then not complete: the caller closes the socket).
+    The socket timeout still applies to a period with no byte (socket.timeout).
+    """
     buf = bytearray()
-    base = sk.gettimeout() if deadline is not None else None
+    timed = deadline is not None or stop is not None
+    base = sk.gettimeout() if timed else None
     try:
+        idle = time.monotonic()
         while len(buf) < n:
-            if deadline is not None:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    raise ScanTimeout("frame not complete in time (%d of %d bytes)" % (len(buf), n))
-                sk.settimeout(left if base is None else min(base, left))
-            chunk = sk.recv(min(n - len(buf), 1 << 20))
+            if timed:
+                now = time.monotonic()
+                limit = base
+                if deadline is not None:
+                    left = deadline - now
+                    if left <= 0:
+                        raise ScanTimeout("frame not complete in time (%d of %d bytes)" % (len(buf), n))
+                    limit = left if limit is None else min(limit, left)
+                if stop is not None:
+                    if base is not None:
+                        quiet = base - (now - idle)
+                        if quiet <= 0:
+                            raise socket.timeout("timed out")
+                        limit = min(limit, quiet)
+                    limit = tick if limit is None else min(limit, tick)
+                sk.settimeout(limit)
+            try:
+                chunk = sk.recv(min(n - len(buf), 1 << 20))
+            except socket.timeout:
+                if stop is None:
+                    raise
+                if stop():
+                    raise Stopped("stopped by the caller after %d of %d bytes" % (len(buf), n))
+                continue
             if not chunk:
                 raise ProtocolError("connection closed after %d of %d bytes" % (len(buf), n))
             buf += chunk
+            idle = time.monotonic()
     finally:
-        if deadline is not None:
+        if timed:
             sk.settimeout(base)
     return bytes(buf)
 
@@ -597,12 +623,19 @@ class Scanner:
         self.flush_poll = 0.5                       # seconds between two C2 reads in the wait
         self.flush_exit_wait = 5.0                  # the exit bit can stay set without paper [HW]
         self.stop_flush_wait = 5.0                  # the wait after Stopped (the stop deadline is near)
+        self.abort_poll = 0.2                       # a READ that waits for its reply examines abort() this often
+        self.stop_cmd_timeout = 5.0                 # after Stopped: the longest wait for each reply (D8, E0, C2, D6)
+        self._cmd_limit = None                      # this limit, while it is set
 
     # Connections
+    def _timeout(self, t):
+        return t if self._cmd_limit is None else min(t, self._cmd_limit)
+
     def _connect(self, port):
-        sk = self.net.tcp_connect((self.ip, port), self.timeout)
+        timeout = self._timeout(self.timeout)
+        sk = self.net.tcp_connect((self.ip, port), timeout)
         try:
-            sk.settimeout(self.timeout)
+            sk.settimeout(timeout)
             greet = recv_exact(sk, 16)
         except Exception:
             sk.close()
@@ -677,8 +710,13 @@ class Scanner:
         return keepalive(self.ip, self.host_ip, self.host_mac, self.search_port, timeout, self.net, repeat, interval)
 
     # Port1
-    def cmd(self, cdb, out=b"", inlen=0):
-        """Send one CDB. Return (scsi status, data-in)."""
+    def cmd(self, cdb, out=b"", inlen=0, stop=None):
+        """Send one CDB. Return (scsi status, data-in).
+
+        STOP (a function): examined while the reply does not come (each abort_poll seconds).
+        If it gives True, raise Stopped. The reply can come later on this connection, so
+        the connection closes; the next command opens a new one.
+        """
         if self.p1 is None:
             self.p1 = self._connect(self.port1)
         h = bytearray(64)
@@ -689,17 +727,17 @@ class Scanner:
         h[24:28] = socket.inet_aton(self.host_ip)
         struct.pack_into(">III", h, 32, len(cdb), inlen, len(out))
         h[48:48 + len(cdb)] = bytes(cdb)
-        deadline = time.monotonic() + self.frame_timeout
+        deadline = time.monotonic() + self._timeout(self.frame_timeout)
         try:
             self.p1.sendall(bytes(h) + bytes(out))
-            rh = recv_exact(self.p1, 40, deadline)
+            rh = recv_exact(self.p1, 40, deadline, stop, self.abort_poll)
             total, key, st, scsi = struct.unpack_from(">I4sii", rh, 0)
             if key != KEY or total < 40:
                 raise ProtocolError("bad reply header %s" % rh.hex(" "))
             # The data-in is at most INLEN bytes (+ a small prefix, for example the page/sequence ID).
             if total - 40 > inlen + REPLY_SLACK:
                 raise ProtocolError("command %02X: reply of %d bytes for %d requested" % (cdb[0], total - 40, inlen))
-            data = recv_exact(self.p1, total - 40, deadline) if total > 40 else b""
+            data = recv_exact(self.p1, total - 40, deadline, stop, self.abort_poll) if total > 40 else b""
         except (OSError, IxError):
             self.close()
             raise
@@ -767,7 +805,10 @@ class Scanner:
                 raise ScanTimeout("READ window %02X page %d: side not complete in %d s" % (win, page,
                                                                                           self.side_timeout))
             cdb = [0x28, 0, 0, 0, 0, win, 0x30, 0, 0, 0, page & 0xFF, seq & 0xFF]
-            scsi, d = self.cmd(cdb, inlen=READ_SIZE)
+            if self.abort is not None:             # a READ without a reply stops at abort()
+                scsi, d = self.cmd(cdb, inlen=READ_SIZE, stop=self.abort)
+            else:
+                scsi, d = self.cmd(cdb, inlen=READ_SIZE)
             if scsi == 8:                          # busy: send the same READ again
                 time.sleep(0.05)
                 continue
@@ -1082,6 +1123,11 @@ class Scanner:
                 sides = None
         except IxError as e:
             e.result = result
+            if isinstance(e, Stopped):
+                # The stop deadline is near: each reply of the cancel (and of D6) gets at
+                # most stop_cmd_timeout s. A READ that did not get its reply closed Port1;
+                # the cancel uses a new connection.
+                self._cmd_limit = self.stop_cmd_timeout
             if isinstance(e, Stopped) and self.job_state == "active":
                 # D8 and D6 alone leave paper stuck in the path [HW]. The stop deadline is
                 # near: wait at most stop_flush_wait s for the eject.
@@ -1093,7 +1139,10 @@ class Scanner:
             e.result = result
             raise
         finally:
-            self._end_job()
+            try:
+                self._end_job()
+            finally:
+                self._cmd_limit = None
         return result
 
     def _end_job(self):

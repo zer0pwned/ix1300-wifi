@@ -133,6 +133,8 @@ class Emulator:
                       "probe_off": 0, "tcp_off": 0, "keepalive_dropped": 0}
         self.fail_d6 = False           # D6 answers CHECK CONDITION (sense key 5)
         self.d5_close = False          # D5 starts the job, but the reply is lost (connection closed)
+        self.hang_read = None          # page ID: the first image READ of this page gets no reply
+        self.hang_release = threading.Event()   # until this event (a Wi-Fi stall)
         self.job = None
         self.params = None
         self.power_off_time = bytearray([0x10, 0x1E])   # E6 data bytes 0-1: 240 minutes, on [NV]
@@ -392,6 +394,11 @@ class Emulator:
         if op not in EXEMPT and not owner_ok:
             return None                        # the scanner closes the connection
         self.log.append((op, bytes(cdb)))
+        if op == 0x28 and cdb[2] == 0 and self.hang_read is not None and cdb[10] == self.hang_read:
+            self.hang_read = None
+            self.stats["hung"] = self.stats.get("hung", 0) + 1
+            self.hang_release.wait(60)         # no reply on this connection until the release
+            return None
         with self.lock:
             return self._dispatch(op, cdb, out, inlen)
 

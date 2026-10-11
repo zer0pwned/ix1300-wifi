@@ -155,14 +155,13 @@ class JobTest(unittest.TestCase):
                      document=dict(filename="a.pdf", title="A", profile="doc", pages=1, receipt=False, created=0))
         jd2.save()
         self.start()
-        self.assertTrue(wait_for(lambda: len(self.out.docs) >= 1))
-        doc = self.out.docs[0]
-        self.assertEqual(doc.pages, 2)
-        self.assertIn("recovered after a service restart", doc.warnings)
-        self.assertTrue(wait_for(lambda: self.ls("jobs") == []))
-        self.svc.clock.advance(3600)                                  # the retry thread starts
-        self.assertTrue(wait_for(lambda: self.ls("unsent") == []))  # the worker sent the second job too
-        self.assertEqual(len(self.out.docs), 2)
+        # The first job gets a new PDF; the delivery of the second job continues (A10).
+        self.assertTrue(wait_for(lambda: len(self.out.docs) == 2))
+        by_id = {d.job_id: d for d in self.out.docs}
+        self.assertEqual(by_id[jd.id].pages, 2)
+        self.assertIn("recovered after a service restart", by_id[jd.id].warnings)
+        self.assertEqual(by_id[jd2.id].pages, 1)
+        self.assertTrue(wait_for(lambda: self.ls("jobs") == [] and self.ls("unsent") == []))
 
     def test_cli_retry(self):
         jd = J.JobDir.create(self.work, "doc")

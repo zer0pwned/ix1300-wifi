@@ -3,8 +3,10 @@
 Threads:
   main       reserve, trigger packets, scan jobs (one at a time). It owns the scanner;
   keepalive  UDP keepalive while we have a reserve;
-  worker     pipeline and outputs (the scanner is free again during this work);
-  retry      new attempts for the jobs in work_dir/unsent.
+  worker     pipeline: the PDF (the scanner is free again during this work);
+  out-NAME   one for each output: its queue of documents (OutputQueue). A slow or
+             failing output delays only its own documents;
+  retry      puts the due jobs of work_dir/unsent into the output queues.
 If one of these threads stops because of an error, run_forever() gives exit code 1,
 so that Docker starts the container again.
 
@@ -16,6 +18,7 @@ import errno
 import logging
 import os
 import queue
+import random
 import signal
 import socket
 import threading
@@ -135,6 +138,10 @@ class Service:
         self.cfg = cfg
         self.net = net or SystemNet()
         self.clock = clock or time.monotonic
+        # The wall clock for the due times in the manifests (they stay valid after a restart).
+        # With a test clock it moves with the test clock.
+        self.wall = time.time if clock is None else (lambda: time.time() + self.clock() - time.monotonic())
+        self.random = random.random            # the jitter of the retry waits
         self.scanner_options = dict(scanner_options or {})
         self.stop_event = threading.Event()
         self.outputs = outputs if outputs is not None else outputs_mod.build(cfg.outputs)
@@ -170,8 +177,11 @@ class Service:
         self.stop_at = None
         self.stopped = False
         self.fatal = None
-        self.retry_next = {}               # job ID -> self.clock() of the next attempt
-        self.output_locks = {}             # output name -> Lock: one document at a time for each output
+        self.output_locks = {}             # output name -> Lock: one document at a time for each output (sync)
+        self.async_delivery = False        # start(): the output queues send the documents (not process())
+        self.queues = {}                   # output name -> OutputQueue
+        self.deliveries = {}               # job ID -> Delivery: the jobs in the output queues
+        self.delivery_cond = threading.Condition()
         self.stop_deadline = None          # self.clock(): a READ that still waits stops (Scanner.abort)
         self.auto_register_at = None       # self.clock() of the last registration attempt (auto_register)
         workers = max(1, int(cfg.pipeline.get("workers", 1)))
@@ -186,12 +196,18 @@ class Service:
         self.trigger_sock = self.net.udp(bind=(sc.get("host_ip") or "", int(sc["trigger_port"])))
         self.trigger_port = self.trigger_sock.getsockname()[1]
         log.info("trigger port %d", self.trigger_port)
+        self.async_delivery = True
+        for name in self.outputs:
+            self.queues[name] = outputs_mod.OutputQueue(name, lambda jid, name=name: self._attempt_one(name, jid),
+                                                        clock=self.clock, poll=self.retry_poll)
         try:
             self.recover()
         except Exception:
             log.exception("recovery of old jobs failed")
-        for name, fn in (("main", self._main), ("keepalive", self._keepalive), ("worker", self._worker),
-                         ("retry", self._retry_loop)):
+        threads = [("main", self._main), ("keepalive", self._keepalive), ("worker", self._worker),
+                   ("retry", self._retry_loop)]
+        threads += [("out-" + name, q.run) for name, q in self.queues.items()]
+        for name, fn in threads:
             t = threading.Thread(target=self._run_thread, args=(name, fn), name="ix1300-" + name, daemon=True)
             t.start()
             self.threads[name] = t
@@ -237,12 +253,29 @@ class Service:
         if worker is not None and worker.is_alive():
             log.warning("document work not complete: the next start continues the jobs in %s",
                         os.path.join(self.work_dir, JOBS))
+        # The output queues send the documents that are due now, then stop. A later attempt
+        # keeps its due time in the manifest: the next start continues it.
+        for q in self.queues.values():
+            q.close()
+        out_threads = [t for n, t in self.threads.items() if n.startswith("out-")]
+        for t in out_threads:
+            t.join(max(0.1, deadline - time.monotonic()))
+        with self.delivery_cond:
+            left = list(self.deliveries.values())
+        if left:
+            log.warning("%d documents not sent to all outputs: the next start continues them", len(left))
+            if not any(t.is_alive() for t in out_threads):
+                for d in left:                   # no thread uses them now
+                    d.jd.unclaim()
         self.executor.shutdown(wait=False, cancel_futures=True)
         if self.trigger_sock:
             self.trigger_sock.close()
 
     def wait_idle(self):
+        """Wait until the worker has no job and the first delivery of each document is complete."""
         self.jobs.join()
+        with self.delivery_cond:
+            self.delivery_cond.wait_for(lambda: not any(d.first for d in self.deliveries.values()))
 
     def run_forever(self):
         """Run until SIGTERM or SIGINT. Return the exit code (1 if a thread stopped)."""
@@ -722,14 +755,16 @@ class Service:
 
     # --- Documents and outputs (worker thread) ---
     def _retry_loop(self):
-        """New attempts for the jobs in work_dir/unsent. A thread of its own: a slow output
-        does not stop the PDF work of new scans."""
+        """New attempts for the jobs in work_dir/unsent: the due jobs go into the output queues."""
         next_retry = self.clock() + self.retry_first
         while not self.stop_event.wait(self.retry_poll):
             if self.clock() >= next_retry:
                 next_retry = self.clock() + self.retry_period
                 try:
-                    self.retry_unsent()
+                    if self.async_delivery:
+                        self.schedule_unsent()
+                    else:
+                        self.retry_unsent()
                 except Exception:
                     log.exception("new attempt for unsent jobs failed")
 
@@ -748,13 +783,16 @@ class Service:
                 log.exception("document processing failed")
             finally:
                 with self.lock:
-                    self.backlog -= 1
-                    self.jobs_done += 1
+                    self.backlog -= 1           # the output queues have the document: not in the backlog
+                    if not getattr(item, "handed", False):
+                        self.jobs_done += 1     # else at the end of its first delivery
                 self.jobs.task_done()
 
     def process(self, job, save_to=None, send=True):
         """Make the PDF of JOB and send it. Remove the job directory only if all outputs have it
         and no original must stay (JobDir.retain_reason). Then give the job lock back.
+        In the service (after start()), the output queues send the PDF: this function
+        returns at once, and the delivery gives the job lock back (_finish_delivery).
 
         SAVE_TO (CLI): also write the PDF to this file ("" = the document file name).
         SEND=False (CLI without --send): no outputs; the saved file is the delivery.
@@ -762,7 +800,8 @@ class Service:
         try:
             return self._process(job, save_to, send)
         finally:
-            job.dir.unclaim()
+            if not getattr(job, "handed", False):
+                job.dir.unclaim()            # else the delivery gives the job lock back
 
     def _adopt(self, job):
         """Find the side files that the manifest does not know (crash or full disk) and add their pages."""
@@ -830,6 +869,10 @@ class Service:
                 jd.m["save_error"] = "cannot write %s: %s" % (save_to or doc.filename, e.strerror or e)
                 log.error("%s", jd.m["save_error"])
         jd.save()
+        if self.async_delivery and send and save_to is None:
+            job.handed = True                    # the output queues send it; this thread is free
+            self._start_delivery(jd, doc, names, first=True)
+            return doc
         self.send(jd, doc)
         self.documents.append(dict(filename=doc.filename, pages=doc.pages, receipt=doc.receipt, size=doc.size,
                                    status={n: st["ok"] for n, st in jd.m["outputs"].items()}))
@@ -882,6 +925,178 @@ class Service:
             t.start()
         for t in threads:
             t.join()
+
+    # --- Output queues (service) ---
+    def _output_wait(self, out, n):
+        """Seconds before the next attempt of OUT after N failed attempts in this round (with jitter)."""
+        fn = getattr(out, "retry_wait", None)
+        if fn is not None:
+            return float(fn(n, self.random))
+        return outputs_mod.retry_wait(float(getattr(out, "retry_delay", 0) or 0), n, self.random)
+
+    def _round_wait(self, attempts):
+        """Seconds before the next round for an unsent job after ATTEMPTS earlier rounds (with jitter)."""
+        sv = self.cfg.service
+        wait = min(float(sv["retry_max_interval"]), float(sv["retry_interval"]) * 2 ** attempts)
+        return wait * (0.5 + 0.5 * self.random())
+
+    def _start_delivery(self, jd, doc, names, first, attempts=0):
+        """Put JD (the caller has its job lock) into the queues of the outputs NAMES. Each
+        output starts at the due time in the manifest (now if it has none). The delivery
+        has the job lock until all NAMES are done (_finish_delivery)."""
+        d = Delivery(jd, doc, names, first, attempts)
+        with self.delivery_cond:
+            self.deliveries[jd.id] = d
+        if not names:
+            self._finish_delivery(d)
+            return
+        now, wall = self.clock(), self.wall()
+        for name in names:
+            q = self.queues.get(name)
+            if q is None:                        # no output with this name: an error at once
+                self._attempt_one(name, jd.id)
+                continue
+            due = jd.m["outputs"].get(name, {}).get("due") or 0
+            q.put(jd.id, now + max(0.0, float(due) - wall))
+
+    def _attempt_one(self, name, jid):
+        """One attempt of output NAME for job JID (the thread of the output queue)."""
+        with self.delivery_cond:
+            d = self.deliveries.get(jid)
+        if d is None or name not in d.active:
+            return
+        jd, out = d.jd, self.outputs.get(name)
+        with d.mutex:
+            st = dict(jd.m["outputs"].get(name) or {"ok": False, "attempts": 0})
+        st["attempts"] = int(st.get("attempts", 0)) + 1
+        st["round"] = int(st.get("round", 0)) + 1
+        again = None
+        if out is None:
+            ok = False
+            st.update(error="no output with this name in the configuration", permanent=True)
+        else:
+            try:
+                ok = outputs_mod.attempt(out, d.doc)
+            except Exception as e:              # an output must not stop its queue
+                log.exception("output %s failed", name)
+                out.last_error, out.last_permanent = str(e) or e.__class__.__name__, False
+                ok = False
+            if ok:
+                st["ok"] = True
+                for k in ("error", "permanent", "due", "round"):
+                    st.pop(k, None)
+                reply = getattr(out, "last_reply", None)
+                if isinstance(reply, bytes) and reply and hasattr(out, "redact"):
+                    st["reply"] = out.redact(reply[:200].decode("utf-8", "replace").strip())
+            else:
+                st["ok"] = False
+                st["error"] = getattr(out, "last_error", None) or "failed"
+                st["permanent"] = bool(getattr(out, "last_permanent", False))
+                if not st["permanent"] and st["round"] <= int(getattr(out, "retries", 0) or 0):
+                    again = self._output_wait(out, st["round"])
+                    st["due"] = self.wall() + again
+                else:
+                    st.pop("due", None)
+                log.warning("output %s: job %s: attempt %d failed: %s%s", name, jid, st["attempts"], st["error"],
+                            " (no new attempt: change the configuration)" if st["permanent"] else
+                            "" if again is None else "; next attempt in %.0f s" % again)
+        with d.mutex:
+            jd.m["outputs"][name] = st
+            try:
+                jd.save()
+            except OSError as e:
+                log.error("job %s: cannot write the manifest: %s", jid, e)
+        if again is not None:
+            self.queues[name].put(jid, self.clock() + again)
+            return
+        with self.delivery_cond:
+            d.active.discard(name)
+            done = not d.active
+        if done:
+            self._finish_delivery(d)
+
+    def _finish_delivery(self, d):
+        """All outputs of the delivery D are done (sent, or no attempt left in this round)."""
+        jd = d.jd
+        try:
+            for n in jd.pending():
+                st = jd.m["outputs"][n]
+                st.pop("round", None)
+                if st.get("permanent") or d.first:
+                    st.pop("due", None)          # the first new attempt of unsent is due at once
+                else:
+                    st["due"] = self.wall() + self._round_wait(d.attempts)
+            if self.stopped and jd.pending():
+                jd.save()                        # the next start continues the delivery
+            elif d.first:
+                self.documents.append(dict(filename=d.doc.filename, pages=d.doc.pages, receipt=d.doc.receipt,
+                                           size=d.doc.size,
+                                           status={n: st["ok"] for n, st in jd.m["outputs"].items()}))
+                del self.documents[:-20]
+                self._settle(jd)
+            elif not jd.pending():
+                log.info("job %s: all outputs done", jd.id)
+                self._settle(jd)
+            else:
+                jd.save()
+        except Exception:
+            log.exception("job %s: delivery end failed", jd.id)
+        finally:
+            jd.unclaim()
+            with self.delivery_cond:
+                self.deliveries.pop(jd.id, None)
+                self.delivery_cond.notify_all()
+            if d.first:
+                with self.lock:
+                    self.jobs_done += 1
+
+    def schedule_unsent(self):
+        """Put the due jobs of work_dir/unsent into the output queues (only the due outputs).
+
+        Not the outputs with a permanent error, and no job after retry_max_attempts.
+        Return the number of jobs put into the queues.
+        """
+        sv = self.cfg.service
+        n = 0
+        for jd in list_jobs(self.work_dir, UNSENT):
+            if self.stop_event.is_set():
+                break
+            with self.delivery_cond:
+                if jd.id in self.deliveries:
+                    continue
+            if not jd.claim():
+                continue
+            handed = False
+            try:
+                if not jd.reload():
+                    continue
+                pending = jd.pending()
+                if jd.m["outputs"] and not pending:
+                    self._settle(jd)
+                    continue
+                attempts = int(jd.m.get("attempts", 0))
+                names = self._due(jd, pending)
+                if not names or attempts >= int(sv["retry_max_attempts"]):
+                    continue
+                if not os.path.exists(jd.pdf_path()) or not jd.m.get("document"):
+                    log.warning("%s: no PDF: use \"ix1300 retry --failed\"", jd.path)
+                    continue
+                jd.m["attempts"] = attempts + 1
+                jd.save()
+                log.info("job %s: new attempt %d for %s", jd.id, attempts + 1, ", ".join(names))
+                self._start_delivery(jd, self.document_for(jd), names, first=False, attempts=attempts)
+                handed = True
+                n += 1
+            finally:
+                if not handed:
+                    jd.unclaim()
+        return n
+
+    def _due(self, jd, names):
+        """The NAMES that have no permanent error and whose due time is now or earlier."""
+        now = self.wall()
+        return [n for n in names if not jd.m["outputs"][n].get("permanent")
+                and float(jd.m["outputs"][n].get("due") or 0) <= now]
 
     def _settle(self, jd):
         """After the delivery: remove the job, or keep it in unsent (or in failed, if originals must stay).
@@ -957,10 +1172,9 @@ class Service:
         """One attempt for the pending outputs of JD (the caller has the job lock). Return 1 if all are done."""
         sv = self.cfg.service
         attempts = int(jd.m.get("attempts", 0))
-        names = jd.pending() if force else [n for n in jd.pending() if not jd.m["outputs"][n].get("permanent")]
+        names = jd.pending() if force else self._due(jd, jd.pending())
         if jd.pending():
-            if not force and (not names or attempts >= int(sv["retry_max_attempts"]) or
-                              self.clock() < self.retry_next.get(jd.id, 0)):
+            if not force and (not names or attempts >= int(sv["retry_max_attempts"])):
                 return 0
             if not os.path.exists(jd.pdf_path()) or not jd.m.get("document"):
                 log.warning("%s: no PDF: use \"ix1300 retry --failed\"", jd.path)
@@ -970,11 +1184,13 @@ class Service:
             self.send(jd, self.document_for(jd), names)
         if jd.m["outputs"] and not jd.pending():
             log.info("job %s: all outputs done", jd.id)
-            self.retry_next.pop(jd.id, None)
             self._settle(jd)                     # the same rules as after the first delivery
             return 1
-        wait = min(float(sv["retry_max_interval"]), float(sv["retry_interval"]) * 2 ** attempts)
-        self.retry_next[jd.id] = self.clock() + wait
+        due = self.wall() + self._round_wait(attempts)
+        for n in jd.pending():                   # the due time stays valid after a restart
+            if not jd.m["outputs"][n].get("permanent"):
+                jd.m["outputs"][n]["due"] = due
+        jd.save()
         return 0
 
     def recover(self, kinds=(JOBS,)):
@@ -998,7 +1214,13 @@ class Service:
                     jd.reconcile()
                     if jd.m.get("state") == "delivering" and os.path.exists(jd.pdf_path()) and jd.m.get("document"):
                         log.warning("job %s: the delivery was not complete", jd.id)
-                        self._settle(jd)
+                        if self.async_delivery and kind == JOBS:
+                            # Continue with the saved state of each output (attempts, due time).
+                            names = [k for k in jd.pending() if not jd.m["outputs"][k].get("permanent")]
+                            queued = True
+                            self._start_delivery(jd, self.document_for(jd), names, first=True)
+                        else:
+                            self._settle(jd)
                         n += 1
                         continue
                     if not jd.m.get("sheets"):
@@ -1044,6 +1266,18 @@ class Service:
             job.sheets += 1
             job.submit(sides)
         return job
+
+
+class Delivery:
+    """A document in the output queues: the outputs (ACTIVE) that still have work in this round."""
+
+    def __init__(self, jd, doc, names, first, attempts=0):
+        self.jd = jd
+        self.doc = doc
+        self.active = set(names)
+        self.first = first                # the first delivery after the PDF (else a new attempt for unsent)
+        self.attempts = attempts          # the rounds before this one (unsent: the backoff)
+        self.mutex = threading.Lock()     # for jd.m and jd.save()
 
 
 class Held:
