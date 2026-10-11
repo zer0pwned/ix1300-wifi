@@ -444,6 +444,28 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(len(os.listdir(os.path.join(self.tmp.name, "failed"))), 1)   # the sheet is kept
         self.assertEqual(self.out.docs, [])
 
+    def test_paper_lost_in_front_partial(self):
+        # Image bytes of the second front side came, then "no paper": a warning, sheet 1 only.
+        self.start()
+        self.emu.chunk_size = 5000
+        self.emu.load(Sheet(front="text"), Sheet(front="text", paper_lost="front_data"))
+        self.emu.press()
+        self.assertTrue(wait_for(lambda: len(self.out.docs) == 1))
+        doc = self.out.docs[0]
+        self.assertEqual(doc.pages, 2)
+        self.assertTrue(any("no paper" in w for w in doc.warnings))
+
+    def test_paper_lost_in_front_partial_off(self):
+        self.cfg.service["deliver_partial"] = False
+        self.start()
+        self.emu.chunk_size = 5000
+        self.emu.load(Sheet(front="text"), Sheet(front="text", paper_lost="front_data"))
+        self.emu.press()
+        self.assertTrue(sync(self.svc, self.emu))                # the job is in the worker queue
+        self.svc.wait_idle()
+        self.assertEqual(len(os.listdir(os.path.join(self.tmp.name, "failed"))), 1)   # the sheet is kept
+        self.assertEqual(self.out.docs, [])
+
     def test_no_paper(self):
         # Empty chute: the service reads C2 and starts no job (no D5, no E0, no D6).
         self.start()

@@ -59,7 +59,8 @@ class Sheet:
     jam_mm: Optional[float] = None   # Wi-Fi jam: the side ends early with a normal EOM
     jam_sense: bool = False          # jam with sense 3/80/01 in the back side
     double_feed: object = False      # sense 3/80/07: True or "front" (front side), "back" (after front EOM)
-    paper_lost: bool = False         # sense 3/80/03 in the back side (paper gone in the middle of a sheet)
+    paper_lost: object = False       # sense 3/80/03: True or "back" (back side), "front" (first front READ,
+                                     # no data: end of stack) or "front_data" (after front data)
 
 
 def _recv_exact(sk, n):
@@ -646,7 +647,9 @@ class Emulator:
         if df and ((win == 0x00 and df in (True, "front")) or (win == 0x80 and df == "back")):
             self.hopper.clear()
             return self._check(3, 0x80, 0x07)
-        if win == 0x80 and sheet.paper_lost:
+        lost = sheet.paper_lost
+        if (win == 0x80 and lost in (True, "back")) or (
+                win == 0x00 and (lost == "front" or (lost == "front_data" and side["pos"] > 0))):
             self.hopper.clear()
             return self._check(3, 0x80, 0x03)
         if win == 0x80 and sheet.jam_sense and side["pos"] > 0:

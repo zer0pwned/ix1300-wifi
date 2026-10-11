@@ -305,9 +305,9 @@ class A3RetainTest(ServiceCase):
 # --- A4: the CLI keeps the scan after a failure -------------------------------
 
 class A4CliTest(unittest.TestCase):
-    def run_cli(self, extra_cfg, sheets, args):
+    def run_cli(self, extra_cfg, sheets, args, chunk_size=60000):
         net = make_net()
-        emu = Emulator(net, temp_no_data=0).start()      # no READ poll: the CLI uses Scanner.poll = 0.1 s
+        emu = Emulator(net, temp_no_data=0, chunk_size=chunk_size).start()      # no READ poll: the CLI uses Scanner.poll = 0.1 s
         old = P.SystemNet
         P.SystemNet = lambda: net
         self.addCleanup(setattr, P, "SystemNet", old)
@@ -343,6 +343,23 @@ class A4CliTest(unittest.TestCase):
         self.assertEqual(self.kept(), ["sheet001-back.jpg", "sheet001-front.jpg"])
         self.assertIn(os.path.join(self.work, J.FAILED), err)
         self.assertFalse(os.path.exists(os.path.join(self.work, "x.pdf")))
+
+    def test_a4_paper_lost_in_front_partial_off(self):
+        # Image bytes of the second front side came, then "no paper": an incomplete job.
+        code, err = self.run_cli("deliver_partial = false\n",
+                                 [Sheet(front="text"), Sheet(front="text", paper_lost="front_data")],
+                                 ["--out", "{tmp}/x.pdf"], chunk_size=5000)
+        self.assertEqual(code, 5)
+        self.assertEqual(self.kept(), ["sheet001-back.jpg", "sheet001-front.jpg"])
+        self.assertIn("deliver_partial = false: no PDF", err)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "x.pdf")))
+
+    def test_a4_paper_lost_in_front_partial_on(self):
+        code, err = self.run_cli("", [Sheet(front="text"), Sheet(front="text", paper_lost="front_data")],
+                                 ["--out", "{tmp}/x.pdf"], chunk_size=5000)
+        self.assertIn("only the 1 complete sheets go into the PDF", err)
+        self.assertIn("warning: scan stopped after 1 sheets", err)
+        self.assertTrue(os.path.exists(os.path.join(self.work, "x.pdf")))
 
     def test_a4_save_failure_keeps_sheets(self):
         code, err = self.run_cli("", [Sheet(front="text")], ["--out", "{tmp}/no/such/dir/x.pdf"])

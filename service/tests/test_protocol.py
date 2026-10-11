@@ -317,6 +317,22 @@ class EmulatorTest(unittest.TestCase):
         self.assertEqual(res.sheets, 1)
         self.assertEqual([(s.sheet, s.side) for s in res.sides], [(0, "front"), (0, "back")])
 
+    def test_paper_lost_in_front_side_after_data(self):
+        # Image bytes of the next front side came, then "no paper": the sheet is not complete.
+        self.emu.chunk_size = 80
+        with self.assertRaises(P.PaperLost) as cm:
+            self.scan(Sheet(), Sheet(front="text", paper_lost="front_data"))
+        res = cm.exception.result
+        self.assertEqual(res.sheets, 1)
+        self.assertEqual([(s.sheet, s.side) for s in res.sides], [(0, "front"), (0, "back")])
+        self.assertEqual(self.emu.opcodes()[-1], 0xD6)
+
+    def test_no_paper_at_start_of_front_side_is_normal_end(self):
+        # "No paper" with no image bytes at the start of a front side: the normal end of the stack.
+        r = self.scan(Sheet(), Sheet(front="text", paper_lost="front"))
+        self.assertEqual((r.sheets, len(r.sides)), (1, 2))
+        self.assertEqual(self.emu.opcodes()[-1], 0xD6)
+
     def test_on_sheet_callback(self):
         got = []
         r = self.scan(Sheet(), Sheet(), on_sheet=got.append)

@@ -859,6 +859,10 @@ class Scanner:
 
     # Scan job
     def _read_side(self, win, page):
+        """Read one side. Return the image bytes.
+
+        An error sense gets the attribute "partial": True if image data came.
+        """
         img = bytearray()
         seq = 0
         start = last = time.monotonic()
@@ -907,7 +911,9 @@ class Scanner:
                 add(d)
                 seq += 1
                 continue
-            raise sense_error("READ", sense)
+            err = sense_error("READ", sense)
+            err.partial = len(img) > 0             # image data came: the side is not complete
+            raise err
 
     def _read_mutual(self, pages):
         """Read the two sides of one sheet with mutual READs (long page mode).
