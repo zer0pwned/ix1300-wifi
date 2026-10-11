@@ -4,18 +4,22 @@ A: the documents in the output queues count for max_backlog, and unsent jobs
    go into the output queues only while the queues have space.
 B: the attempt deadline (max_time) also applies to the connection setup.
 C: the service removes secrets from the full reply before it cuts the text.
+D: the trace directory has a total size limit (trace_total_mb).
 """
 import http.client
 import logging
+import os
 import socket
+import tempfile
 import time
+import types
 import unittest
 
 import support  # noqa: F401
 import test_delivery
 from test_daemon import wait_for
 from test_delivery import DeliveryCase, Failing, Gate
-from ix1300 import jobs as J, outputs as O
+from ix1300 import jobs as J, outputs as O, trace as T
 from ix1300.pipeline import Document
 
 SECRET = "SECRETVALUE123"
@@ -145,6 +149,51 @@ class RedactTest(DeliveryCase):
             self.assertTrue(out.attempt(doc()))
         self.assertIn("paperless task 6f1c0f8e-1b2c-4d5e-8f90-0a1b2c3d4e5f", "\n".join(cm.output))
         self.assertEqual(O.reply_text(out, out.last_reply), "6f1c0f8e-1b2c-4d5e-8f90-0a1b2c3d4e5f")
+
+
+
+class TraceRetentionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+
+    def old_files(self, n, size=4096):
+        """N trace files of SIZE bytes; the first file is the oldest."""
+        files = []
+        for i in range(n):
+            fn = os.path.join(self.dir, "service-2026010%d-000000-1.jsonl" % i + (".1" if i % 2 else ""))
+            with open(fn, "w") as fh:
+                fh.write("x" * size)
+            os.utime(fn, (1000 + i, 1000 + i))
+            files.append(fn)
+        return files
+
+    def test_old_trace_files_go_beyond_the_total_size(self):
+        old = self.old_files(10)
+        other = os.path.join(self.dir, "notes.txt")
+        with open(other, "w") as fh:
+            fh.write("y" * 100000)
+        cfg = types.SimpleNamespace(service=dict(trace_dir=self.dir, trace_max_mb=1, trace_total_mb=20 / 1024))
+        tr = T.open_trace(cfg)
+        tr.close()
+        self.assertEqual([fn for fn in old if os.path.exists(fn)], old[-5:])   # the newest 5 x 4 KB = 20 KB
+        self.assertTrue(os.path.exists(tr.path))
+        self.assertTrue(os.path.exists(other))           # not a trace file: it stays
+
+    def test_rotation_also_removes_old_files(self):
+        old = self.old_files(3, size=1000)
+        path = os.path.join(self.dir, "new.jsonl")
+        tr = T.Trace(path, max_bytes=400, total_bytes=3200)
+        self.assertTrue(all(os.path.exists(fn) for fn in old))     # 3000 bytes at the start: all stay
+        for i in range(20):
+            tr.note("line %d" % i)
+        tr.close()
+        sizes = sum(os.path.getsize(os.path.join(self.dir, n)) for n in os.listdir(self.dir))
+        self.assertLessEqual(sizes, 3200 + 400)                     # the current file grows after the check
+        self.assertFalse(os.path.exists(old[0]))                   # a rotation removed the oldest file
+        self.assertTrue(os.path.exists(old[1]))
+        self.assertTrue(os.path.exists(path + ".1"))
 
 
 if __name__ == "__main__":

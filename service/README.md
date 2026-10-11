@@ -1047,6 +1047,11 @@ trace_dir = "/data/trace"
   checksum, and its first and last 32 bytes.
 - A file larger than `trace_max_mb` (50) becomes `<name>.1`, and a new file
   starts.
+- When a file starts, the service removes the oldest trace files in the
+  folder until all trace files together are not larger than `trace_total_mb`
+  (500). Only the files `*.jsonl` and `*.jsonl.1` count. Other files in the
+  folder stay. The new file can then grow to `trace_max_mb` before the next
+  check.
 
 The script `tests/replay.py` reads a trace. It shows the command sequence of
 each job, and it can compare a trace with the emulator.
@@ -1200,6 +1205,7 @@ in sections 3.3 and 5. The comments in `config.example.toml` give more help.
 | `trace_dir` | empty | Folder for the protocol trace. Empty: off |
 | `trace_payload_bytes` | 256 | Longest data in a trace line (bytes) |
 | `trace_max_mb` | 50 | Size of a trace file before a new file starts |
+| `trace_total_mb` | 500 | Size of all trace files in `trace_dir`. The oldest files go first |
 
 ### 16.3 `[pipeline]`
 

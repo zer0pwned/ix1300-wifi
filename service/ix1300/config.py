@@ -88,6 +88,7 @@ DEFAULTS = {
         "trace_dir": "",                  # protocol trace (JSON lines) into this directory ("" = off)
         "trace_payload_bytes": 256,       # trace: the longest payload in hex (image data: only a summary)
         "trace_max_mb": 50,               # trace: a larger file becomes <name>.1, and a new file starts
+        "trace_total_mb": 500,            # trace: the oldest files go when all files together are larger
     },
     "pipeline": {
         "blank_method": "auto",           # auto, pixels, size
@@ -567,7 +568,7 @@ RANGES = {
                 "stop_scan_wait": (0, 3600), "retry_interval": (1, None), "retry_max_interval": (1, None),
                 "retry_max_attempts": (0, None), "keep_raw_max_jobs": (1, 100000),
                 "continue_window": (0, 3600), "trace_payload_bytes": (0, 1 << 20),
-                "trace_max_mb": (1, 100000)},
+                "trace_max_mb": (1, 100000), "trace_total_mb": (1, 1000000)},
     "pipeline": {"blank_ink_ratio": (0, 1), "ink_level": (1, 255), "paper_level": (1, 255),
                  "blank_bytes_per_pixel": (0, None), "receipt_ratio": (0.1, None), "osd_min_confidence": (0, None),
                  "jpeg_quality": (1, 100), "workers": (1, 16), "max_memory_mb": (0, None),
