@@ -1199,7 +1199,11 @@ def ocr_pdf(pages, lang="eng", title="", timeout=600, out_path=None):
             log.warning("OCR failed (%d): %s", r.returncode, r.stderr.strip()[:300])
             return None
         if out_path:
-            shutil.move(base + ".pdf", out_path)
+            # The temporary directory can be on a different file system. Copy the PDF into a
+            # private file next to OUT_PATH, fsync it, rename it, and fsync the directory.
+            # Only then can the caller remove the originals.
+            with open(base + ".pdf", "rb") as fh:
+                commit_file(out_path, iter(lambda: fh.read(1 << 20), b""), sync=True)
             return out_path
         with open(base + ".pdf", "rb") as fh:
             return fh.read()
@@ -1395,6 +1399,7 @@ class Pipeline:
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, out_path)
+                sync_dir(out_dir)                    # the new name is on the disk too
                 pdf = out_path
             else:
                 pdf = write_pdf(pages, title=title, created=now)
