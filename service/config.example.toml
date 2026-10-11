@@ -129,7 +129,8 @@ title_format = "Scan {profile} %Y-%m-%d %H:%M:%S"
 filename_format = "scan-%Y%m%d-%H%M%S.pdf"
 
 # Outputs. Each output has a name and a type: paperless, webhook or directory.
-# Common keys: retries (2), retry_delay (5 s), timeout (s for each network operation),
+# Common keys: retries (2), retry_delay (5 s; then 2 x, 4 x ..., each 50 % to 100 % of the value),
+# timeout (s for each network operation),
 # max_time (600 s for one attempt), verify_tls (true).
 # Delivery is "at least once": after a lost reply, a receiver can get a document two times.
 # Each request has the job ID (header X-Ix1300-Job; webhook field job_id).

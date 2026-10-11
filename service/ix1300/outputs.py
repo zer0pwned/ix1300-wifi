@@ -4,12 +4,17 @@ Delivery is "at least once": if the receiver keeps a document but its reply
 does not come back, the service sends the document again later. Each request
 has the job ID (header X-Ix1300-Job, webhook field "job_id"), so a receiver
 can find copies.
+
+In the service, each output has its own OutputQueue (a thread and a list of
+due times): a slow or failing output delays only its own documents.
 """
+import heapq
 import http.client
 import json
 import logging
 import math
 import os
+import random
 import re
 import socket
 import ssl
@@ -249,29 +254,120 @@ class Output:
     def send(self, doc):
         raise NotImplementedError
 
-    def deliver(self, doc):
-        """Send with retries. Return True on success. Else last_error and last_permanent tell why."""
+    def attempt(self, doc):
+        """One send. Return True on success. Else last_error and last_permanent tell why."""
         self.last_error, self.last_permanent = None, False
-        for attempt in range(self.retries + 1):
-            try:
-                self.last_reply = self.send(doc)
-                log.info("output %s: sent %s", self.name, doc.filename)
+        try:
+            self.last_reply = self.send(doc)
+            log.info("output %s: sent %s", self.name, doc.filename)
+            return True
+        except Exception as e:
+            self.last_error = self.redact(e) or e.__class__.__name__
+            self.last_permanent = bool(getattr(e, "permanent", False))
+            return False
+
+    def retry_wait(self, n, rand=random.random):
+        """Seconds before the next attempt after N failed attempts (N >= 1) of one delivery round.
+
+        Exponential backoff with jitter: retry_delay x 2^(N-1) x (0.5 ... 1.0).
+        """
+        return retry_wait(self.retry_delay, n, rand)
+
+    def deliver(self, doc):
+        """Send with retries (this thread waits). Return True on success. Else last_error and
+        last_permanent tell why. The service uses attempt() and OutputQueue (no wait in a thread)."""
+        for n in range(1, self.retries + 2):
+            if self.attempt(doc):
                 return True
-            except Exception as e:
-                self.last_error = self.redact(e) or e.__class__.__name__
-                self.last_permanent = bool(getattr(e, "permanent", False))
-                log.warning("output %s: attempt %d failed: %s%s", self.name, attempt + 1, self.last_error,
-                            " (no new attempt: change the configuration)" if self.last_permanent else "")
-                if self.last_permanent:
+            log.warning("output %s: attempt %d failed: %s%s", self.name, n, self.last_error,
+                        " (no new attempt: change the configuration)" if self.last_permanent else "")
+            if self.last_permanent or n > self.retries:
+                break
+            delay = self.retry_wait(n)
+            if self.stop is not None:
+                if self.stop.wait(delay):
                     break
-                if attempt < self.retries:
-                    delay = self.retry_delay * (attempt + 1)
-                    if self.stop is not None:
-                        if self.stop.wait(delay):
-                            break
-                    else:
-                        time.sleep(delay)
+            else:
+                time.sleep(delay)
         return False
+
+
+def retry_wait(delay, n, rand=random.random):
+    """DELAY x 2^(N-1) x (0.5 ... 1.0): exponential backoff with jitter (RAND gives 0 ... 1)."""
+    base = float(delay) * 2 ** max(0, n - 1)
+    return base * (0.5 + 0.5 * rand())
+
+
+def attempt(out, doc):
+    """One attempt of OUT (an Output, or any object with deliver(doc)). Return True on success."""
+    fn = getattr(out, "attempt", None)
+    return bool(fn(doc) if fn is not None else out.deliver(doc))
+
+
+class OutputQueue:
+    """The documents for one output, each with its due time. One thread (run()) sends them,
+    one at a time, in the order of the due times (the order of the queue for the same time).
+
+    HANDLER(key) makes one attempt; it can put the key again with a later due time.
+    CLOCK gives the time (the due times use it). The thread examines the queue at least
+    each POLL seconds. After close(), run() sends the documents that are due, then returns.
+    """
+
+    def __init__(self, name, handler, clock=time.monotonic, poll=1.0):
+        self.name = name
+        self.handler = handler
+        self.clock = clock
+        self.poll = poll
+        self.cond = threading.Condition()
+        self.heap = []
+        self.keys = set()
+        self.seq = 0
+        self.closing = False
+        self.busy = None                      # the key of the attempt in work
+
+    def put(self, key, due):
+        with self.cond:
+            if key in self.keys:
+                return
+            self.keys.add(key)
+            self.seq += 1
+            heapq.heappush(self.heap, (due, self.seq, key))
+            self.cond.notify_all()
+
+    def __len__(self):
+        with self.cond:
+            return len(self.heap) + (self.busy is not None)
+
+    def close(self):
+        with self.cond:
+            self.closing = True
+            self.cond.notify_all()
+
+    def _next(self):
+        with self.cond:
+            while True:
+                now = self.clock()
+                if self.heap and self.heap[0][0] <= now:
+                    _due, _seq, key = heapq.heappop(self.heap)
+                    self.keys.discard(key)
+                    self.busy = key
+                    return key
+                if self.closing:
+                    return None
+                self.cond.wait(self.poll if not self.heap else max(0.0, min(self.poll, self.heap[0][0] - now)))
+
+    def run(self):
+        while True:
+            key = self._next()
+            if key is None:
+                return
+            try:
+                self.handler(key)
+            except Exception:
+                log.exception("output %s: delivery failed", self.name)
+            finally:
+                with self.cond:
+                    self.busy = None
 
 
 def _job_headers(doc):
