@@ -142,11 +142,11 @@ cover to turn it on again. The service finds it again in a few seconds.
 - **Receipts.** Use the top chute, not the front slot (the front slot takes
   only short paper). Set the paper guides close to the receipt, and hold the
   end of a long receipt loosely so that it goes in straight.
-- **New features that wait for a test on real hardware:** long receipts
-  (longer than about 90 cm), host registration over Wi-Fi, the auto power-off
-  setting, double-feed detection off, and "continue scanning". If the scanner
-  rejects one of these, the service uses the tested way instead and writes
-  the reason in its log.
+- **New features that wait for a test on real hardware:** receipts longer
+  than about 90 cm, host registration over Wi-Fi, and double-feed detection
+  off. The scanner accepts the auto power-off setting, but a full power-off
+  test with a new time is still to do. If the scanner rejects one of these,
+  the service uses the tested way instead and writes the reason in its log.
 - **Security.** The scanner protocol has no password and no encryption. Use
   it only in a network that you trust.
 - **One program at a time.** The scanner works with one computer at a time.

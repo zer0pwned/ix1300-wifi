@@ -683,22 +683,25 @@ Rules of the service for the items that are not known:
 - The job manifest and `raw.json` record, for each side: the READ count,
   the reply count with data, the image bytes, the sense information of the
   end, and the bytes cut (`reads`).
-### 8.11 Auto power-off time (E6) [NV]
+### 8.11 Auto power-off time (E6)
 
 The vendor software reads and sets the auto power-off time with a Port1
-command. It needs a reserve. No hardware test confirmed this layout.
+command. It needs a reserve. On our scanner, a set and a get worked: the get
+gave back the bytes of the set [HW]. The effect on the real power-off time is
+not tested yet.
 
 | Step | CDB | Data |
 |---|---|---|
 | Get | `E6 00 01 00 00 00 00 04` | 4 bytes in: `CC BB 00 00` |
 | Set | `E6 00 00 00 00 04 00 00` | 4 bytes out: `CC BB 00 00` |
 
+- `00 00`: no value was ever set. The scanner then uses 240 min [HW].
 - `CC` bits 0-6: the time in 15-minute units (`01` = 15 min to `7E` =
   1890 min). `10` = 240 min, the factory value. `7F` = a special 3-minute
   value.
 - `CC` bit 7 = 1: auto power-off is off. The vendor software keeps the time
   bits.
-- `BB`: normally `1E`. Probably the warning time before the power-off in
+- `BB`: `00` on our scanner, `1E` from the vendor software. Probably the warning time before the power-off in
   10 s units (`1E` = 5 min). The service writes `BB` back as it reads it.
 - The scanner probably keeps the value after a power-off.
 - Only a job start (D5) starts the idle time again. A keepalive does not

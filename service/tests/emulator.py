@@ -137,7 +137,7 @@ class Emulator:
         self.hang_release = threading.Event()   # until this event (a Wi-Fi stall)
         self.job = None
         self.params = None
-        self.power_off_time = bytearray([0x10, 0x1E])   # E6 data bytes 0-1: 240 minutes, on [NV]
+        self.power_off_time = bytearray([0x10, 0x1E])   # E6 data bytes 0-1: 240 minutes, on (a real scanner with no value gives 00 00)
         self.e6_log = []               # ("get" or "set", data-out) of each E6 command
         self.e6_ignore_set = False     # E6 set answers GOOD but keeps the old value
         self.e6_check = False          # E6 answers CHECK CONDITION 5/20/00

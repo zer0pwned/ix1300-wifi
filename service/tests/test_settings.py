@@ -117,11 +117,12 @@ class PowerOffScannerTest(unittest.TestCase):
             self.assertFalse(S.apply_power_off(self.sc, 255))
         self.assertTrue(any("power-off" in m for m in cm.output))
 
-    def test_unexpected_reply(self):
-        self.emu.power_off_time[0] = 0x00             # no time and not "off"
-        with self.assertLogs("ix1300", logging.WARNING):
-            self.assertFalse(S.apply_power_off(self.sc, 255))
-        self.assertEqual([k for k, _ in self.emu.e6_log], ["get"])
+    def test_not_set(self):
+        # [HW] a scanner that never got a value gives 00 00 (the factory time, 240 minutes)
+        self.emu.power_off_time[0:2] = [0x00, 0x00]
+        self.assertIn("not set", S.describe_power_off(0, 0))
+        self.assertTrue(S.apply_power_off(self.sc, 255))
+        self.assertEqual(self.emu.e6_log, [("get", b""), ("set", bytes.fromhex("11 00 00 00")), ("get", b"")])
 
     def test_check_condition(self):
         self.emu.e6_check = True

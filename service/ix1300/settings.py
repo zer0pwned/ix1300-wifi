@@ -1,10 +1,14 @@
-"""Scanner settings over Wi-Fi: the auto power-off time (E6) [NV].
+"""Scanner settings over Wi-Fi: the auto power-off time (E6).
 
 Port1 CDB `E6 00 MM 00 00 DO 00 DI` with 4 data bytes `CC BB 00 00`:
 MM = 0 sets the value (4 bytes out), MM = 1 gets the value (4 bytes in).
 CC bits 0-6 = time in 15-minute units (15..1890 minutes), bit 7 = auto
 power-off off. 0x7F is a special 3-minute value. BB is probably the warning
 lead time (0x1E). The service keeps BB as the scanner gives it.
+
+[HW] The scanner keeps the value that a set writes, and a get gives it back.
+A scanner that never got a value gives 00 00 and uses the factory time
+(240 minutes). The effect of a new time on the power-off is not tested.
 
 The double-feed setting is in the D4 data (protocol.ScanSettings.double_feed).
 """
@@ -60,6 +64,8 @@ def describe_power_off(code, b1):
     m = power_off_minutes(code)
     if m == 0:
         text = "off"
+    elif code == 0:
+        text = "not set (factory value %d min)" % (POWER_OFF_DEFAULT_CODE * POWER_OFF_STEP)
     elif m is None:
         text = "unknown"
     else:
@@ -102,8 +108,6 @@ def sync_power_off(scanner, minutes):
     Raise IxError or OSError for an error, SettingsError for an unexpected value."""
     before = read_power_off(scanner)
     log.info("auto power-off on the scanner: %s", describe_power_off(*before))
-    if power_off_minutes(before[0]) is None:
-        raise SettingsError("E6 get: unexpected value %s" % describe_power_off(*before))
     code = power_off_code(minutes, before[0])
     if code == before[0]:
         return PowerOffResult(before, before, False)
