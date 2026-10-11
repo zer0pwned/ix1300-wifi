@@ -95,6 +95,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -277,13 +278,13 @@ hexdump (int level, const char *comment, const unsigned char *p, size_t l)
 }
 
 /* Monotonic time in milliseconds. */
-static long
+static int64_t
 now_ms (void)
 {
   struct timespec ts;
 
   clock_gettime (CLOCK_MONOTONIC, &ts);
-  return (long) ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+  return (int64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /* Ownership of the scan data and of Port1. sane_start, sane_read,
@@ -933,15 +934,15 @@ send_all (int fd, const unsigned char *buf, size_t len)
    If STOP is not NULL, the wait examines *STOP each CANCEL_TICK_MS and
    after a signal. When *STOP is set, return SANE_STATUS_CANCELLED. */
 static SANE_Status
-recv_all (int fd, unsigned char *buf, size_t len, size_t *got, long deadline,
-          volatile sig_atomic_t *stop)
+recv_all (int fd, unsigned char *buf, size_t len, size_t *got,
+          int64_t deadline, volatile sig_atomic_t *stop)
 {
   size_t n = 0;
 
   while (n < len)
     {
       struct pollfd pfd;
-      long left = deadline - now_ms ();
+      int64_t left = deadline - now_ms ();
       long tick = stop ? CANCEL_TICK_MS : 1000;
       ssize_t r;
       int pr;
@@ -1179,7 +1180,7 @@ send_keepalive (struct ix1300 *s)
   unsigned char pkt[IX_SEARCH_LEN];
   unsigned char rep[64];
   struct sockaddr_in sa;
-  long t0 = now_ms ();
+  int64_t t0 = now_ms ();
   int fd, sent = 0, ok = 0;
 
   fd = socket (AF_INET, SOCK_DGRAM, 0);
@@ -1197,8 +1198,8 @@ send_keepalive (struct ix1300 *s)
       struct pollfd pfd;
       struct sockaddr_in from;
       socklen_t fl = sizeof (from);
-      long el = now_ms () - t0;
-      long wait;
+      int64_t el = now_ms () - t0;
+      int64_t wait;
       ssize_t r;
 
       if (el >= KA_WAIT_MS)
@@ -1527,7 +1528,7 @@ do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
   SANE_Status ret = SANE_STATUS_IO_ERROR;
   unsigned long total, status, dlen;
   volatile sig_atomic_t *stop = s->scan_io ? &s->cancel_req : NULL;
-  long deadline = 0;
+  int64_t deadline = 0;
   size_t keep;
   int attempt;
 
@@ -2093,7 +2094,7 @@ flush_paper (struct ix1300 *s)
   unsigned char sd[18];
   unsigned char hw[0x30];
   size_t sl = 0;
-  long start, clear_at = -1;
+  int64_t start, clear_at = -1;
   SANE_Status r;
   int scsi;
 
@@ -2126,7 +2127,7 @@ flush_paper (struct ix1300 *s)
   start = now_ms ();
   for (;;)
     {
-      long now;
+      int64_t now;
 
       if (get_hw_status (s, hw, sizeof (hw)) != SANE_STATUS_GOOD)
         {
@@ -2158,7 +2159,7 @@ flush_paper (struct ix1300 *s)
       usleep (500000);
     }
   DBG (5, "flush_paper: the paper path is empty after %ld ms\n",
-       now_ms () - start);
+       (long) (now_ms () - start));
 }
 
 /* Send D8 or D6 (6-byte CDB, no data) at the end of a job. BUSY means
@@ -2427,7 +2428,7 @@ job_setup (struct ix1300 *s)
    with KEEP = 0. *LAST gets the time of the last new data. */
 static SANE_Status
 side_add (struct ix1300 *s, int page, int keep, struct ix1300_image *img,
-          size_t len, size_t *got, long *last)
+          size_t len, size_t *got, int64_t *last)
 {
   size_t n;
 
@@ -2471,8 +2472,8 @@ read_side (struct ix1300 *s, int win, int page, int keep,
 {
   unsigned char cdb[12];
   unsigned char sd[18];
-  long start = now_ms ();
-  long last = start;
+  int64_t start = now_ms ();
+  int64_t last = start;
   SANE_Status ret;
   size_t len, sl;
   size_t got = 0;
@@ -2485,7 +2486,7 @@ read_side (struct ix1300 *s, int win, int page, int keep,
   for (;;)
     {
       unsigned int key, asc, ascq;
-      long now = now_ms ();
+      int64_t now = now_ms ();
 
       if (cancel_pending (s))
         return SANE_STATUS_CANCELLED;
@@ -2592,7 +2593,7 @@ read_side (struct ix1300 *s, int win, int page, int keep,
     }
 
   DBG (5, "read_side: window 0x%02x: %d replies, %lu bytes, %ld ms\n",
-       win, chunks, (unsigned long) got, now_ms () - start);
+       win, chunks, (unsigned long) got, (long) (now_ms () - start));
   return SANE_STATUS_GOOD;
 }
 
