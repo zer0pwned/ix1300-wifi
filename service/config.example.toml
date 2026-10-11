@@ -179,7 +179,7 @@ path = "/data/out"
 dpi = 300                     # 150, 200, 300 or 600
 color = "auto"                # auto, color or gray
 duplex = true                 # false: one side for each sheet: the side with more print
-paper_face = "down"           # order only: down = back side first (printed side down in the chute)
+paper_face = "up"             # page order: up = load the stack face up, first page on top (reading order)
 blank_skip = true
 length = "auto"               # "auto" (up to 895 mm), "long" (up to 3,000 mm) or a length in mm
 # rotate = "auto"             # change pipeline.rotate for this profile

@@ -1,162 +1,206 @@
-# ix1300-wifi: ScanSnap iX1300 on Linux over Wi-Fi
+# ix1300-wifi
 
-This repository lets a Linux computer use a PFU (Fujitsu) ScanSnap iX1300
-over Wi-Fi, without the vendor software (ScanSnap Home). It has two parts:
+**Use a ScanSnap iX1300 with Linux, over Wi-Fi. Push the Scan button, and get a PDF.**
 
-- **Scan service** (`service/`): a Docker service. You push the Scan button
-  on the scanner. The service scans all sheets, makes a PDF, and sends it to
-  Paperless-ngx, to an HTTP webhook, or to a directory.
-- **SANE backend** (`sane-backend/`): the `ix1300` backend for SANE. The
-  standard SANE programs (`scanimage`, `scanadf`, `gscan2pdf`) can then scan
-  over Wi-Fi.
+The ScanSnap iX1300 is a small document scanner from PFU (formerly Fujitsu).
+Its own software, ScanSnap Home, runs only on Windows and macOS. This project
+replaces it on Linux: you put paper in the scanner, you push the button, and
+the PDF arrives in Paperless-ngx, in a folder, or at any web address that you
+choose. You do not need a computer screen or a USB cable for daily use.
 
-The repository also has the tools for the one-time USB setup (Wi-Fi network
-and host ID), and a description of the protocol (`PROTOCOL.md`).
+```
+  ┌─────────────┐   Wi-Fi    ┌──────────────────┐        ┌────────────────┐
+  │  iX1300     │ ─────────► │  ix1300 service  │ ─────► │ Paperless-ngx  │
+  │  (Scan      │  button +  │  (Docker, any    │  PDF   │ a folder       │
+  │   button)   │  images    │   Linux host)    │        │ a webhook      │
+  └─────────────┘            └──────────────────┘        └────────────────┘
+```
 
-## Status and limits
+The project also has a **SANE backend**. With it, the normal Linux scan
+programs (`scanimage`, `scanadf`, `gscan2pdf`, `sane-scan-pdf`) can use the
+scanner over Wi-Fi too.
 
-- We tested the code with one iX1300 (firmware 0J00) on a WPA2-PSK network.
-- Only the top paper chute is available. The front slot (return path) is not
-  available over Wi-Fi.
-- TLS is not implemented. The scanner protocol has no authentication and no
-  encryption. Use the scanner only in a trusted network.
-- The scanner feeds all sheets in the chute in one job. There is no clean
-  stop after a number of sheets. Load only the sheets that you want to scan.
-- Only 300 dpi and the automatic color mode were tested on the scanner.
-  `PROTOCOL.md` and `service/README.md` (section 9) show the items that are
-  not verified.
+> This is an independent project. It is not from Ricoh, PFU, or Fujitsu.
+> It works well on our scanner, but it has had only one scanner to test on.
 
-## Quick start
+---
 
-### 1. One-time setup over USB
+## What it does
 
-Do these steps one time, on a Linux computer with the scanner on USB. Open
-the cover to turn the scanner on. Stop `saned` and other scanner programs
-first.
+- **One button, two kinds of documents.** A short press scans normal
+  documents. A long press (hold the button until it flashes blue) scans
+  receipts. You can send each kind to a different place.
+- **Clean PDFs.** The service removes blank pages, turns upside-down pages,
+  and puts the pages in reading order. For receipts, it also straightens the
+  image and cuts away the empty space around the paper.
+- **Long receipts.** Receipts of up to about 3 m can go through in one piece
+  (new, see "Good to know").
+- **Two ways to load paper.** The top chute takes a stack of sheets. The front
+  slot takes one card, photo, or thick sheet at a time.
+- **No lost scans.** The service keeps each scan on disk until every output
+  has received it. If your Paperless server is down, the service tries again
+  later.
+- **No cloud.** Everything stays in your network.
 
-1. Make a host ID (16 hex digits). The scanner accepts commands over Wi-Fi
-   only from a host with the registered ID:
+---
 
-   ```
-   python3 -c "import secrets; print(secrets.token_hex(8).upper())"
-   ```
+## What you need
 
-   The examples below use `0123456789ABCDEF`. Use your own value.
+- A ScanSnap iX1300.
+- A Linux computer that is always on, with Docker (for example a Raspberry
+  Pi, a NAS, or a home server). A Raspberry Pi 5 works well. A very small
+  computer (512 MB of memory) works for normal documents, but not with the
+  extra image work for receipts.
+- The scanner and the Linux computer in the same network.
+- A USB cable and about 15 minutes, **one time only**, to put the scanner on
+  your Wi-Fi network.
 
-2. Build the service image, and make the configuration:
+---
 
-   ```
-   cd service
-   mkdir -p config data
-   cp config.example.toml config/config.toml
-   docker compose build
-   ```
+## Setup
 
-   Write the host ID into `scanner.host_id` in `config/config.toml`.
+The setup has three steps. You do steps 1 and 2 only one time.
 
-3. Connect the scanner to your Wi-Fi network (the command asks for the
-   key):
+### Step 1: Prepare the service
 
-   ```
-   docker compose run --rm --user root --privileged -v /dev/bus/usb:/dev/bus/usb \
-       ix1300 usb-wifi-setup --ssid MyNetwork
-   ```
+```
+git clone https://github.com/zer0pwned/ix1300-wifi.git
+cd ix1300-wifi/service
+mkdir -p config data
+cp config.example.toml config/config.toml
+docker compose build
+```
 
-4. Register the host ID:
+The scanner accepts commands only from a computer that it knows. This
+computer has a "host ID": a random number of 16 hex digits. Make one:
 
-   ```
-   docker compose run --rm --user root --privileged -v /dev/bus/usb:/dev/bus/usb \
-       ix1300 usb-register-host --host-id 0123456789ABCDEF
-   ```
+```
+python3 -c "import secrets; print(secrets.token_hex(8).upper())"
+```
 
-5. Disconnect the USB cable. Give the scanner a fixed IP address in your
-   router (DHCP reservation), and write it into `scanner.ip`.
+Write it into `config/config.toml` as `host_id` in the `[scanner]` section.
 
-Without Docker, you can use `tools/setwifi.py` and `tools/ixusb.py`
-(`reghostid:<ID>`) as root. They need `libusb-1.0`.
+### Step 2: Connect the scanner to Wi-Fi (USB cable, one time)
 
-### 2. Run the service
+Connect the scanner to the Linux computer with the USB cable. Open the cover
+to turn the scanner on. Then run these two commands. The first one asks for
+your Wi-Fi password. The second one tells the scanner your host ID.
 
-1. Write the outputs (Paperless-ngx, webhook, or directory) into
-   `config/config.toml`. Refer to `service/README.md`, section 4.
-2. Start the service:
+```
+docker compose run --rm --user root --privileged -v /dev/bus/usb:/dev/bus/usb \
+    ix1300 usb-wifi-setup --ssid YourNetworkName
 
-   ```
-   sudo chown 1000:1000 data && chmod 700 data
-   docker compose up -d
-   docker compose logs -f
-   ```
+docker compose run --rm --user root --privileged -v /dev/bus/usb:/dev/bus/usb \
+    ix1300 usb-register-host --host-id YOUR_HOST_ID
+```
 
-3. Put paper in the chute, printed side down. Push the Scan button.
+Disconnect the USB cable. In your router, give the scanner a fixed IP address,
+and write that address into `config/config.toml` as `ip`.
 
-The service uses the host network. The scanner sends the button events to
-UDP port 55265 on the host. Open this port in the host firewall for the
-scanner.
+### Step 3: Tell the service where to send the PDFs, and start it
 
-### 3. SANE backend (optional)
+In `config/config.toml`, fill in at least one output: Paperless-ngx (address
+and API token), a folder, or a webhook address. The file has examples, and
+[`service/README.md`](service/README.md) explains each setting. Then start
+the service:
 
-On Debian, the script builds the backend from the sane-backends 1.3.1
-source and installs it:
+```
+sudo chown 1000:1000 data && chmod 700 data
+docker compose up -d
+docker compose logs -f
+```
+
+When the log shows `reserved scanner`, the service is ready.
+
+---
+
+## Daily use
+
+1. Open the cover. The scanner turns on.
+2. Put the paper in:
+   - **Top chute** (a stack): the first page on top, the printed side up,
+     top edge first.
+   - **Front slot** (one card or thick sheet): face up, top edge first.
+3. Push the Scan button:
+   - **Short press:** a normal document. All sheets go into one PDF.
+   - **Long press:** hold the button until it **flashes blue**, then release.
+     The service uses the receipt settings.
+4. The PDF arrives in your outputs a few seconds later.
+
+If you push the button with no paper in the scanner, nothing happens. That
+is normal.
+
+The scanner turns itself off after some hours with no use. Open and close the
+cover to turn it on again. The service finds it again in a few seconds.
+
+---
+
+## Good to know
+
+- **Load only the sheets that you want to scan.** The scanner always takes
+  the whole stack. It has no way to stop after a number of sheets.
+- **Receipts.** Use the top chute, not the front slot (the front slot takes
+  only short paper). Set the paper guides close to the receipt, and hold the
+  end of a long receipt loosely so that it goes in straight.
+- **New features that wait for a test on real hardware:** long receipts
+  (longer than about 90 cm), host registration over Wi-Fi, the auto power-off
+  setting, double-feed detection off, and "continue scanning". If the scanner
+  rejects one of these, the service uses the tested way instead and writes
+  the reason in its log.
+- **Security.** The scanner protocol has no password and no encryption. Use
+  it only in a network that you trust.
+- **One program at a time.** The scanner works with one computer at a time.
+  Do not run the service and a SANE program at the same time. ScanSnap Home
+  on another computer can take over the scanner; the service log then shows
+  how to fix it.
+
+---
+
+## The SANE backend (optional)
+
+If you prefer the normal Linux scan programs, install the SANE backend on a
+Debian or Raspberry Pi OS computer:
 
 ```
 cd sane-backend
-sudo HOSTID=0123456789ABCDEF ./install-on-debian.sh
+sudo HOSTID=YOUR_HOST_ID ./install-on-debian.sh
 scanimage -L
 ```
 
-Refer to `sane-backend/README.md`. Do not use the service and the SANE
-backend at the same time: the scanner accepts one host only.
+Use `--source "ADF Duplex"` for the top chute and `--source "Card Duplex"`
+for the front slot. [`sane-backend/README.md`](sane-backend/README.md) has
+the details.
 
-## Button gestures
+---
 
-| Gesture | Result |
+## For developers
+
+| Folder or file | What is in it |
 |---|---|
-| Short press (push and release) | Scan with `service.short_press_profile` |
-| Long press: hold the Scan button until it flashes blue (about 3 s), then release | Scan with `service.long_press_profile` (for example a receipt profile) |
+| [`service/`](service/README.md) | The scan service (Python, Docker) and its tests |
+| [`sane-backend/`](sane-backend/README.md) | The SANE backend, the patch for sane-backends 1.3.1, and its tests |
+| `tools/` | Two small USB tools for the one-time setup without Docker |
+| [`PROTOCOL.md`](PROTOCOL.md) | How the scanner talks over USB and Wi-Fi |
 
-A press with an empty chute starts no job. A long press works only with
-paper in the chute.
-
-## Repository layout
-
-| Path | Content |
-|---|---|
-| `service/` | The scan service (Python, Docker). Refer to [`service/README.md`](service/README.md) |
-| `sane-backend/` | The SANE backend `ix1300`, the patch for sane-backends 1.3.1, and a test harness. Refer to [`sane-backend/README.md`](sane-backend/README.md) |
-| `tools/ixusb.py` | Raw USB tool: SCSI commands, setup messages, host ID registration |
-| `tools/setwifi.py` | Wi-Fi setup over USB |
-| [`PROTOCOL.md`](PROTOCOL.md) | The USB setup messages and the Wi-Fi scan protocol |
-
-## Tests
-
-The tests use no scanner and no network:
+The tests need no scanner and no network:
 
 ```
 python3 -m unittest discover -s service/tests
 make -C sane-backend/tests
 ```
 
-The service tests use only the Python standard library. Some tests need a
-JPEG decoder (Pillow or `djpeg`). The SANE harness needs a C compiler and
-the libjpeg headers.
+---
 
-## License
+## License and disclaimer
 
-- The SANE backend (`sane-backend/`) is under the GNU General Public License
-  version 2 or later, with the SANE exception (the same license as the other
-  SANE backends). Refer to [`sane-backend/LICENSE`](sane-backend/LICENSE).
-- All other files are under the MIT license. Refer to [`LICENSE`](LICENSE).
+The SANE backend is under the GPL version 2 or later, with the SANE exception,
+like all other SANE backends ([`sane-backend/LICENSE`](sane-backend/LICENSE)).
+All other files are under the MIT license ([`LICENSE`](LICENSE)).
 
-## Disclaimer
+ScanSnap is a trademark of PFU Limited. This project is not from, or supported
+by, Ricoh, PFU, or Fujitsu. It contains no vendor software and no vendor
+firmware. `PROTOCOL.md` describes only the messages that go over the USB cable
+and the network.
 
-This project is not affiliated with, endorsed by, or supported by Ricoh,
-PFU, or Fujitsu. ScanSnap is a trademark of PFU Limited. Other names can be
-trademarks of their owners.
-
-`PROTOCOL.md` describes only the messages on the USB cable and on the
-network. The repository contains no vendor software and no vendor firmware.
-
-Use this software at your own risk. It can cause paper jams, and it can
-feed paper out without a scan. It can change the Wi-Fi settings and the
-registered host ID of your scanner. There is no warranty (refer to the
-license files).
+Use this software at your own risk. It can change the Wi-Fi settings of your
+scanner, and paper can jam or go through without a scan. There is no warranty.
