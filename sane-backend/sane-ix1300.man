@@ -60,9 +60,10 @@ scanner turns itself off and you turn it on again.
 
 .SH OPTIONS
 .TP
-.B \-\-source "ADF Front" | "ADF Back" | "ADF Duplex"
-Selects the side of the sheet. The backend uses the names of the scanner.
-Window 0 is the front.
+.B \-\-source "ADF Front" | "ADF Back" | "ADF Duplex" | "Card Front" | "Card Back" | "Card Duplex"
+Selects the paper path and the side of the sheet. ADF is the top paper
+chute. Card is the front slot (return path). The backend uses the names
+of the scanner. Window 0 is the front.
 .PP
 .RS
 CAUTION: Usually you load the paper with the printed side down. Then the
@@ -73,6 +74,17 @@ side. For a single\-sided document, use
 .PP
 With "ADF Duplex", the backend gives two frames for each sheet: first the
 front, then the back.
+.PP
+The Card sources scan one sheet from the front slot. Put one sheet into
+the slot. The job ends after that sheet, and the sheet comes back out at
+the front. The front slot does not take paper longer than an A4 sheet: a
+long receipt jams. With no sheet in the front slot,
+.B sane_start
+gives SANE_STATUS_NO_DOCS and starts no job. With an ADF source and a
+sheet only in the front slot,
+.B sane_start
+also gives SANE_STATUS_NO_DOCS, and the debug output shows a hint to
+select a Card source.
 .RE
 .TP
 .B \-\-mode Color | Gray | Lineart
@@ -178,7 +190,9 @@ READ of a new sheet, before image data.
 .TP
 .B SANE_STATUS_JAMMED
 A paper jam, a double feed, or a lost sheet (sense 3/80/03 on the back
-side or after image data).
+side or after image data). Also: paper of an uncertain old job is in the
+paper path (see
+.BR "PAPER FEED AND CANCEL" ).
 .TP
 .B SANE_STATUS_IO_ERROR
 No new image data for 60 seconds, a side that is not complete in 600
@@ -192,12 +206,21 @@ An option change during a job. Call
 first.
 .PP
 .B sane_cancel
-can come from a signal handler or a different thread. If
+can come from a signal handler or a different thread. It only sets a
+flag. It does no network I/O, no memory operation and no debug output.
+If
 .B sane_start
-or
+runs, a wait for a scanner reply stops in 0.1 seconds (also in the middle
+of one reply), and
+.B sane_start
+ends the job on a new connection and gives SANE_STATUS_CANCELLED. If
 .B sane_read
-runs at that time, the call stops at its next safe point and gives
-SANE_STATUS_CANCELLED.
+runs, it stops after its current line. If no call runs, the next
+.BR sane_read ,
+.BR sane_start ,
+option change or
+.B sane_close
+ends the job. Until then, the scanner keeps the job.
 
 .SH "PAPER FEED AND CANCEL"
 The scanner feeds all sheets in the chute in one job. It does not wait
@@ -212,10 +235,11 @@ E0 gives END OF PAPER (sense 3/80/03), and the backend sends END JOB
 .PP
 When the frontend stops before the end of the stack, it calls
 .BR sane_cancel .
-.B sane_cancel
-(and
+The cancel (at the next call, see
+.BR "STATUS VALUES" )
+and
 .B sane_close
-in a job) sends CANCEL READ (D8), then E0. On the iX1300, E0 after D8
+in a job send CANCEL READ (D8), then E0. On the iX1300, E0 after D8
 makes the scanner feed out
 .B the rest of the stack without a scan.
 The backend waits until GET HW STATUS (C2) shows an empty chute and a
@@ -224,15 +248,29 @@ gives sense 5/24/00, so the backend sends no READ.
 .PP
 With
 .BR "\-\-halt\-on\-cancel=yes" ,
-.B sane_cancel
-sends D8 and D6 only. The motor stops at once, and D6 does not eject
+the cancel sends D8 and D6 only. The motor stops at once, and D6 does not eject
 paper. A sheet that the scanner already pulled in can stop in the paper
 path, or it can still come out; this depends on how far it was. The rest
 of the stack stays in the chute. If paper stays in the path, open the ADF
 top section and remove it before the next scan.
 .PP
 After an error (for example a paper jam or a timeout), the backend sends
-D8 and D6 only. Remove the paper by hand.
+D8 and D6 only. Remove the paper by hand. If the scanner gives BUSY for D8
+or D6, the backend sends the command again after 0.25 seconds (at most 20
+times).
+.PP
+If the reply of D5 or D6 is lost, or if the backend makes a new reserve
+while a job was active, the job is uncertain. The next
+.B sane_start
+then sends D8 and D6 on the new connection (no E0), at most two times.
+Before the next D5, it reads C2. If paper is at the feed sensor (ADF
+source, or paper in the chute), paper of the old job is still in the
+paper path:
+.B sane_start
+gives SANE_STATUS_JAMMED and sends no D5. Remove the paper and start
+again. For a Card source with an empty chute, this check cannot see a
+difference between old paper and a sheet in the front slot. The backend
+never sends E0, READ, D5 or D6 again after a lost reply.
 
 .SH FILES
 .TP
@@ -261,8 +299,8 @@ ports. The backend cannot use such a scanner.
 .IP \(bu 2
 The backend does not register a host ID. Register the ID over USB first.
 .IP \(bu 2
-The paper must be in the top paper chute (ADF). The front slot (return
-path) is not available.
+The front slot (Card sources) takes one sheet at a time, and no paper
+longer than an A4 sheet.
 .IP \(bu 2
 The maximum page height is 895.5 mm. Long paper mode is not available.
 .IP \(bu 2

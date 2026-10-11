@@ -35,6 +35,7 @@ struct fk_reply
   size_t extra;                 /* add this number of zero bytes */
   int close_now;                /* close the connection, no reply */
   int trickle_ms;               /* real delay between reply bytes */
+  int trickle_data_only;        /* send the header at once, then trickle */
   int advance_ms;               /* advance the fake clock first */
 };
 
@@ -63,6 +64,8 @@ struct fk_model
   int thread_fail;
   int e0_cancel_check;          /* E0 after D8: CHECK 5/24/00 (else GOOD) */
   long eject_ms;                /* eject time of one sheet after D8 + E0 */
+  int front_slot;               /* the sheets are in the front slot (1 sheet) */
+  int exit_stale;               /* C2 exit bit set with no paper [HW] */
 
   /* Hook of the test: return 1 if it filled the reply. */
   int (*hook) (const unsigned char *cdb, size_t cdb_len, size_t in_req,
@@ -78,9 +81,15 @@ struct fk_model
   unsigned char sense[18];
   int d5_in_job;                /* D5 while a job was active */
   int cancelled;                /* D8 in a job: the motor stopped [HW] */
+  int exhausted;                /* E0 gave "no paper" in this job: the
+                                   path is empty. Paper that a test loads
+                                   later is in the chute only. */
   long eject_until;             /* fake clock: the eject after D8 + E0 ends */
   int ejected;                  /* sheets fed out without a scan */
   int stuck;                    /* sheets left in the scanner after D6 */
+  unsigned char e9[32];         /* data of the last E9 */
+  unsigned char d4[0x50];       /* data of the last D4 */
+  int n_e9, n_d4;
   int cnt[256];                 /* commands seen, by opcode */
   int n_reserve, n_release, n_ka, n_probe;
   int port1_conns;

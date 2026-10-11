@@ -58,6 +58,7 @@ scanimage -d ix1300:192.0.2.212 --source "ADF Back" --mode Gray \
 scanimage -d ix1300:192.0.2.212 --source "ADF Duplex" --batch=p%03d.pnm
 scanimage -d ix1300:192.0.2.212 --source "ADF Duplex" --batch=p%03d.pnm \
           --batch-count=4
+scanimage -d ix1300:192.0.2.212 --source "Card Duplex" --batch=card%d.pnm
 ```
 
 Load only the sheets that you want to scan. The scanner feeds the whole
@@ -71,11 +72,31 @@ on the **back** side. For one-sided documents, use `--source "ADF Back"`.
 With `ADF Duplex`, the backend gives two frames for each sheet: first the
 front, then the back.
 
+### Front slot (Card sources)
+
+The `Card Front`, `Card Back` and `Card Duplex` sources scan from the
+front slot (return path). The sides are the same as for the ADF sources
+(window 0 is the front). The names are the same as in the fujitsu
+backend.
+
+- Put **one sheet** into the front slot. The slot takes one sheet at a
+  time, and the job ends after that sheet. The sheet comes back out at
+  the front.
+- **No long paper.** The front slot does not take paper longer than an
+  A4 sheet: a long receipt jams.
+- With a Card source, `sane_start` reads C2 first. With no sheet in the
+  front slot, it gives SANE_STATUS_NO_DOCS and starts no job.
+- With an ADF source and a sheet only in the front slot, `sane_start`
+  also gives SANE_STATUS_NO_DOCS. The debug output (`SANE_DEBUG_IX1300=1`)
+  then shows "paper is in the front slot; select a Card source".
+- `page-loaded` follows the source: the chute for ADF, the front slot
+  for Card.
+
 ### Options
 
 | Option | Values | Note |
 |---|---|---|
-| `--source` | ADF Front, ADF Back, ADF Duplex | See above |
+| `--source` | ADF Front, ADF Back, ADF Duplex, Card Front, Card Back, Card Duplex | See above. Card: the front slot, one sheet |
 | `--mode` | Color, Gray, Lineart | Lineart is a software threshold |
 | `--resolution` | 150, 200, 300, 600 | |
 | `--page-width`, `--page-height` | mm | The maximum height gives the automatic length (895.5 mm) |
@@ -122,19 +143,40 @@ paper jam, or an open cover.
 
 After an error (for example a paper jam or a timeout), the backend sends
 D8 and D6 only, because the paper path can have a jam. Remove the paper
-by hand. If D6 fails, the next `sane_start` sends D8 and D6 again before
-a new job (no E0: it could feed out the paper of the new job). The
-backend reports a failure of D8 or D6 in the debug output (level 1).
+by hand. If the scanner gives BUSY for D8 or D6, the backend sends the
+command again after 0.25 s (at most 20 times): BUSY means that the
+scanner did not do the command. The backend reports a failure of D8 or D6
+in the debug output (level 1).
+
+Uncertain job: if the reply of D5 or D6 is lost, or if the backend makes
+a new reserve while a job was active, the backend does not know if the
+scanner still has the job. The next `sane_start` then does a bounded
+recovery on the new connection before the next D5:
+
+1. D8 and D6 (no E0: it could feed out the paper of the new job). For
+   this job, an error sense for D6 means "no job". If D8 and D6 fail,
+   `sane_start` tries one more time, then gives the error. The job stays
+   uncertain, and the next `sane_start` starts the recovery again.
+2. The C2 check in the job start: if paper is at the feed sensor (ADF
+   source, or paper in the chute), paper of the old job is still in the
+   paper path. The backend does not send D5 (D5 would feed this paper into
+   the new job) and gives `SANE_STATUS_JAMMED`. Open the ADF top section,
+   remove the paper, and start again. The check stays active until C2
+   shows a clear feed sensor. For a Card source with an empty chute, the
+   check cannot see a difference between old paper and a sheet in the
+   front slot.
+
+The backend never sends E0, READ, D5 or D6 again after a lost reply.
 
 ### Status values
 
 | Status | Meaning |
 |---|---|
 | `SANE_STATUS_NO_DOCS` | The chute is empty: E0, or the first READ of a new sheet (before image data), gave sense 3/80/03 |
-| `SANE_STATUS_JAMMED` | Paper jam, double feed, or the sheet was lost: sense 3/80/03 on the back side or after image data |
+| `SANE_STATUS_JAMMED` | Paper jam, double feed, or the sheet was lost: sense 3/80/03 on the back side or after image data. Also: paper of an uncertain old job is in the paper path (see above) |
 | `SANE_STATUS_IO_ERROR` | No new image data for 60 s, a side that is not complete in 600 s, a side larger than 64 MiB, a bad reply, or JPEG data that is not complete or not valid |
 | `SANE_STATUS_DEVICE_BUSY` | An option change during a job (call `sane_cancel` first), or a different call uses the device |
-| `SANE_STATUS_CANCELLED` | `sane_cancel` stopped the scan |
+| `SANE_STATUS_CANCELLED` | `sane_cancel` stopped the scan, or `sane_read` after `sane_cancel` |
 
 A frame never gets lines that are not in the JPEG data. If the JPEG data
 of a side is not complete, `sane_read` gives the good lines and then
@@ -164,27 +206,42 @@ of a side is not complete, `sane_read` gives the good lines and then
    after the first sheet, also not after a timeout. The scanner pulls the
    next sheets into the paper path early, so the bit shows "empty" while
    sheets are still in the scanner.
-6. `sane_cancel` in a job sends D8, E0 (the scanner feeds out the rest of
-   the stack), waits for a clear paper path, and sends D6. With
-   `--halt-on-cancel`, it sends D8 and D6 only. `sane_close` does the
-   same, then sends the release.
+6. A cancel in a job sends D8, E0 (the scanner feeds out the rest of the
+   stack), waits for a clear paper path, and sends D6. With
+   `--halt-on-cancel`, it sends D8 and D6 only. `sane_cancel` only sets a
+   flag; the next call does this work (see "Cancel" below). `sane_close`
+   does the same, then sends the release.
 7. A full reply must come in the `timeout` time (30 s). The backend sends a
    command again on a new connection only if this is safe: INQUIRY, C2,
    D8, E9 and D4. It does not send E0, READ, D5 or D6 again. If the reply
-   of D5 is lost, the backend sends D8 and D6.
+   of D5 or D6 is lost, the next `sane_start` does the recovery of an
+   uncertain job (D8, D6, C2 check).
 
 Reserve: if the scanner does not answer a keepalive (3 packets in 3 s), or
 if it sends a power or release event, the next `sane_start` sends a
 keepalive again. If there is no reply, the backend searches the scanner
 again and makes a new reserve. This is necessary after the scanner turns
-itself off (after about 4 hours) and you turn it on again.
+itself off (after about 4 hours) and you turn it on again. If a job was
+active, the job is then uncertain, and the backend does the recovery
+(D8, D6, C2 check) before the next D5.
 
 Cancel: `sane_cancel` can come from a signal handler or a different thread.
-If `sane_start` or `sane_read` runs at that time, `sane_cancel` only sets a
-flag. The call that runs stops at the next safe point, frees the data, and
-gives `SANE_STATUS_CANCELLED`. When no call runs, `sane_cancel` stops the
-job immediately (this part uses the network and is not safe in a signal
-handler).
+It only sets a flag (an atomic `sig_atomic_t`). It does no network I/O, no
+memory operation and no debug output, so it is safe in a signal handler.
+
+- If `sane_start` runs, a wait for a scanner reply stops in 0.1 s (also in
+  the middle of one reply). The backend closes Port1, because the reply is
+  not complete. Then `sane_start` ends the job on a new connection and
+  gives `SANE_STATUS_CANCELLED`.
+- If `sane_read` runs, it stops after its current line, ends the job and
+  gives `SANE_STATUS_CANCELLED`.
+- If no call runs, the next `sane_read` (it gives `SANE_STATUS_CANCELLED`),
+  `sane_start` (it then starts a new job), option change or `sane_close`
+  ends the job. Until then, the scanner keeps the job. A frontend that
+  calls `sane_cancel` and then stops without `sane_close` leaves the job
+  open in the scanner until the reserve ends.
+
+A cancel does not stop the end of the job itself (D8, E0, the wait, D6).
 
 The scan button: while the device is open, the backend reads C2 byte 4
 (bit 0 short press, bit 5 long press) and the UDP trigger packets that the
@@ -219,7 +276,8 @@ not in the repository. Without it, `make orig` does nothing.
 
 - The backend has no TLS. It cannot use a scanner in "RED" or "SEC" mode.
 - The backend does not register a host ID.
-- Only the top paper chute is available. The front slot is not available.
+- The front slot (Card sources) takes one sheet at a time and no paper
+  longer than an A4 sheet.
 - The maximum page height is 895.5 mm. Long paper mode is not available.
 - The scanner selects the color automatically. The backend converts the
   image to the mode that you selected.

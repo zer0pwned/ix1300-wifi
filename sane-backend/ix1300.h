@@ -123,6 +123,12 @@ enum ix1300_Option
 /* Value for the E9 pre-read length (it works on the iX1300). */
 #define IX_PREREAD_LENGTH 0x4350
 
+/* Front slot (return path) job [HW]: E9 pre-read length, and D4
+   parameter bytes 1 and 4 (top chute: 0x03 and 0x88). */
+#define IX_FRONT_PREREAD_LENGTH 0x4410
+#define IX_FRONT_D4_PATH        0x06
+#define IX_FRONT_D4_BYTE4       0x00
+
 /* GET HW STATUS (C2) bits. */
 #define IX_HW_HOPPER_BYTE 3
 #define IX_HW_HOPPER_BIT  0x80     /* 1 = no paper in the chute */
@@ -152,6 +158,9 @@ enum ix1300_Option
 #define STRING_ADFFRONT   SANE_I18N("ADF Front")
 #define STRING_ADFBACK    SANE_I18N("ADF Back")
 #define STRING_ADFDUPLEX  SANE_I18N("ADF Duplex")
+#define STRING_CARDFRONT  SANE_I18N("Card Front")
+#define STRING_CARDBACK   SANE_I18N("Card Back")
+#define STRING_CARDDUPLEX SANE_I18N("Card Duplex")
 
 #define STRING_NONE       SANE_I18N("None")
 #define STRING_JPEG       SANE_I18N("JPEG")
@@ -160,8 +169,17 @@ enum ix1300_source
 {
   SOURCE_ADF_FRONT = 0,
   SOURCE_ADF_BACK,
-  SOURCE_ADF_DUPLEX
+  SOURCE_ADF_DUPLEX,
+  SOURCE_CARD_FRONT,            /* front slot (return path), one sheet */
+  SOURCE_CARD_BACK,
+  SOURCE_CARD_DUPLEX
 };
+
+#define IX_SOURCE_IS_CARD(src)  ((src) >= SOURCE_CARD_FRONT)
+#define IX_SOURCE_IS_FRONT(src) \
+  ((src) == SOURCE_ADF_FRONT || (src) == SOURCE_CARD_FRONT)
+#define IX_SOURCE_IS_BACK(src) \
+  ((src) == SOURCE_ADF_BACK || (src) == SOURCE_CARD_BACK)
 
 enum ix1300_mode
 {
@@ -254,7 +272,7 @@ struct ix1300
   SANE_Option_Descriptor opt[NUM_OPTIONS];
   int options_ready;
 
-  SANE_String_Const source_list[4];
+  SANE_String_Const source_list[7];
   SANE_String_Const mode_list[4];
   SANE_String_Const compress_list[3];
   SANE_Int res_list[5];
@@ -293,9 +311,11 @@ struct ix1300
   int paper_exit;         /* C2: paper at the exit sensor */
 
   /* -------- scan state -------- */
-  volatile sig_atomic_t cancel_req;
+  volatile sig_atomic_t cancel_req;  /* set by sane_cancel (atomic) */
   int owner;              /* 1 = a call owns the scan data (atomic) */
+  int scan_io;            /* 1 = a cancel stops the wait for a reply */
   int job_state;          /* enum ix1300_job */
+  int path_check;         /* 1 = read C2 for old paper before D5 */
   int sheet;              /* sheet counter in the job */
   unsigned char *rbuf;    /* receive buffer for one READ reply */
 

@@ -323,6 +323,26 @@ is_read_data (const unsigned char *cdb)
   return cdb[0] == 0x28 && cdb[2] == 0;
 }
 
+/* Real time in ms (the fake clock can jump). */
+static long
+real_now_ms (void)
+{
+  struct timespec ts;
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (long) ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* sane_cancel only sets a flag. The next sane_read does the work. */
+static SANE_Status
+cancel_sync (void)
+{
+  SANE_Byte b[4];
+  SANE_Int l = 0;
+
+  sane_cancel (H);
+  return sane_read (H, b, sizeof (b), &l);
+}
+
 /* ---------------------------------------------------------------- */
 /* tests                                                             */
 
@@ -1390,7 +1410,7 @@ t_c2_cancel_flush (void)
   CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
   CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
   CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF, "read");
-  sane_cancel (H);
+  CHECK (cancel_sync () == SANE_STATUS_CANCELLED, "read after cancel");
   d8 = log_last (0xD8);
   e0 = log_last (0xE0);
   d6 = log_last (0xD6);
@@ -1419,7 +1439,7 @@ t_c3_cancel_halt (void)
   CHECK (set_int (i, SANE_TRUE) == SANE_STATUS_GOOD, "set failed");
   CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
   CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF, "read");
-  sane_cancel (H);
+  CHECK (cancel_sync () == SANE_STATUS_CANCELLED, "read after cancel");
   d8 = log_last (0xD8);
   CHECK (fk.job == 0, "the job is still active in the scanner");
   CHECK (d8 > 0 && log_last (0xD6) > d8, "no D8 before D6");
@@ -1442,7 +1462,7 @@ t_c4_flush_e0_sense (void)
   set_str (OPT_SOURCE, "ADF Duplex");
   CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1 front");
   CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF, "read");
-  sane_cancel (H);
+  CHECK (cancel_sync () == SANE_STATUS_CANCELLED, "read after cancel");
   CHECK (fk.job == 0, "the job is still active in the scanner");
   CHECK (fk.ejected == 3, "%d sheets ejected (3 expected)", fk.ejected);
   CHECK (fk_now_ms () >= fk.eject_until, "D6 before the end of the eject");
@@ -1482,7 +1502,7 @@ t_c5_flush_limit (void)
   read_frame (NULL, NULL, 65536);
   fk.hook = hook_c5;
   t0 = fk_now_ms ();
-  sane_cancel (H);
+  CHECK (cancel_sync () == SANE_STATUS_CANCELLED, "read after cancel");
   CHECK (fk.job == 0, "the job is still active in the scanner");
   CHECK (fk_now_ms () - t0 >= 100000L && fk_now_ms () - t0 < 200000L,
          "the wait took %ld ms", fk_now_ms () - t0);
@@ -1602,6 +1622,517 @@ t_c9_uncertain_no_flush (void)
 }
 
 
+/* ---------------------------------------------------------------- */
+/* Cancel safety (B3, B4) and recovery of an uncertain job (B7)      */
+
+/* B3: sane_cancel when no call runs (as from a signal handler). It must
+   not use the network or the debug output (these are not safe in a
+   signal handler). The next call ends the job: D8, E0, D6. */
+static int b3i_msgs;
+static void
+hook_count (const char *msg)
+{
+  (void) msg;
+  b3i_msgs++;
+}
+
+static int
+t_b3_cancel_idle_no_io (void)
+{
+  int n0, d8, e0, d6;
+  SANE_Status st;
+
+  load_sheets (3, IMG_H);
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
+  CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF, "read");
+  n0 = fk.nlog;
+  h_dbg_hook = hook_count;
+  sane_cancel (H);
+  h_dbg_hook = NULL;
+  CHECK (fk.nlog == n0, "sane_cancel sent %d Port1 commands", fk.nlog - n0);
+  CHECK (b3i_msgs == 0, "sane_cancel wrote %d debug messages", b3i_msgs);
+  CHECK (fk.job == 1, "sane_cancel ended the job itself");
+  st = sane_read (H, (SANE_Byte *) fail_msg, 4, &n0);
+  CHECK (st == SANE_STATUS_CANCELLED, "sane_read after sane_cancel gave %s",
+         sane_strstatus (st));
+  d8 = log_last (0xD8);
+  e0 = log_last (0xE0);
+  d6 = log_last (0xD6);
+  CHECK (fk.job == 0, "the job is still active in the scanner");
+  CHECK (d8 > 0 && e0 > d8 && d6 > e0, "order D8 %d, E0 %d, D6 %d", d8, e0,
+         d6);
+  CHECK (fk.ejected == 2, "%d sheets ejected (2 expected)", fk.ejected);
+  /* A new job after the cancel starts normally. */
+  load_sheets (1, IMG_H);
+  fk.fed = 0;
+  sane_cancel (H);
+  st = sane_start (H);
+  CHECK (st == SANE_STATUS_GOOD, "start after an idle cancel gave %s",
+         sane_strstatus (st));
+  CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF, "next read");
+  sane_close (H);
+  CHECK (fk.job == 0, "the job is still active after sane_close");
+  return 0;
+}
+
+/* B3: options can change after sane_cancel (the cancel ends the job at
+   the option change). */
+static int
+t_b3_cancel_then_option (void)
+{
+  SANE_Status st;
+
+  load_sheets (3, IMG_H);
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
+  read_frame (NULL, NULL, 65536);
+  sane_cancel (H);
+  st = set_int (OPT_RES, 600);
+  CHECK (st == SANE_STATUS_GOOD, "option change after sane_cancel: %s",
+         sane_strstatus (st));
+  CHECK (fk.job == 0, "the job is still active in the scanner");
+  CHECK (fk.ejected == 2, "%d sheets ejected (2 expected)", fk.ejected);
+  sane_close (H);
+  return 0;
+}
+
+/* B3: a signal handler calls sane_cancel while sane_start waits for a
+   slow READ reply. The wait must stop soon, not at the end of the reply
+   frame. The job then ends (D8, E0, D6). */
+static pthread_t b3_main;
+static int b3_kick_ms;
+static int b3_use_signal;
+static int b3_rd;
+
+static void
+b3_sig (int sig)
+{
+  (void) sig;
+  sane_cancel (H);
+}
+
+static void *
+b3_kick (void *arg)
+{
+  struct timespec ts;
+
+  (void) arg;
+  ts.tv_sec = b3_kick_ms / 1000;
+  ts.tv_nsec = (b3_kick_ms % 1000) * 1000000L;
+  nanosleep (&ts, NULL);
+  if (b3_use_signal)
+    pthread_kill (b3_main, SIGUSR1);
+  else
+    sane_cancel (H);
+  return NULL;
+}
+
+static int
+hook_slow_read (const unsigned char *cdb, size_t cl, size_t in,
+                struct fk_reply *r)
+{
+  if (is_read_data (cdb) && ++b3_rd == 1)
+    {
+      fk_model_cmd (cdb, cl, in, r);
+      r->trickle_ms = 100;
+      r->trickle_data_only = !b3_use_signal;
+      return 1;
+    }
+  return 0;
+}
+
+static int
+run_cancel_in_reply (int use_signal, long *took, SANE_Status *st)
+{
+  struct sigaction sa;
+  pthread_t t;
+  long t0;
+
+  load_sheets (3, IMG_H);
+  fk.temp_first = 0;
+  fk.chunk = 40;
+  fk.hook = hook_slow_read;
+  b3_use_signal = use_signal;
+  b3_kick_ms = 300;
+  memset (&sa, 0, sizeof (sa));
+  sa.sa_handler = b3_sig;
+  sigemptyset (&sa.sa_mask);
+  sigaction (SIGUSR1, &sa, NULL);
+  if (open_dev () != SANE_STATUS_GOOD)
+    return 1;
+  b3_main = pthread_self ();
+  pthread_create (&t, NULL, b3_kick, NULL);
+  t0 = real_now_ms ();
+  *st = sane_start (H);
+  *took = real_now_ms () - t0;
+  pthread_join (t, NULL);
+  return 0;
+}
+
+static int
+t_b3_cancel_signal_in_reply (void)
+{
+  SANE_Status st;
+  long took;
+
+  CHECK (run_cancel_in_reply (1, &took, &st) == 0, "open failed");
+  CHECK (b3_rd >= 1, "test error: no READ");
+  CHECK (st == SANE_STATUS_CANCELLED, "start gave %s",
+         sane_strstatus (st));
+  CHECK (took < 2000, "sane_start stopped %ld ms after the start (the "
+         "cancel came after 300 ms)", took);
+  CHECK (fk.job == 0, "the job is still active in the scanner");
+  CHECK (fk.ejected == 2, "%d sheets ejected (2 expected)", fk.ejected);
+  sane_close (H);
+  return 0;
+}
+
+/* B4: a different thread calls sane_cancel while the data of one READ
+   reply comes slowly. The wait must stop soon. */
+static int
+t_b4_cancel_in_payload (void)
+{
+  SANE_Status st;
+  long took;
+
+  CHECK (run_cancel_in_reply (0, &took, &st) == 0, "open failed");
+  CHECK (b3_rd >= 1, "test error: no READ");
+  CHECK (st == SANE_STATUS_CANCELLED, "start gave %s",
+         sane_strstatus (st));
+  CHECK (took < 2000, "sane_start stopped %ld ms after the start (the "
+         "cancel came after 300 ms)", took);
+  CHECK (fk.job == 0, "the job is still active in the scanner");
+  sane_close (H);
+  return 0;
+}
+
+/* B7: the reserve and Port1 are lost in a job. The scanner can still
+   have the job. After the new reserve (a new connection), the backend
+   must end the old job (D8, D6) and read C2 before the next D5. */
+static int
+t_b7_new_reserve_uncertain (void)
+{
+  SANE_Status st;
+  int d6;
+
+  load_sheets (3, IMG_H);
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
+  read_frame (NULL, NULL, 65536);
+  fk.reserved = 0;
+  fk.ka_mode = 1;
+  fk_drop_port1 ();
+  set_reserve_lost ((struct ix1300 *) H, 1);
+  usleep (20000);
+  st = sane_start (H);
+  CHECK (st != SANE_STATUS_GOOD, "start without a reserve gave GOOD");
+  CHECK (fk.job == 1, "test error: the scanner job ended");
+  d6 = fk.cnt[0xD6];
+  st = sane_start (H);
+  CHECK (fk.n_reserve == 2, "reserve count %d", fk.n_reserve);
+  CHECK (fk.d5_in_job == 0, "D5 was sent into the old job (start %s)",
+         sane_strstatus (st));
+  CHECK (fk.cnt[0xD6] > d6, "no D6 after the new reserve");
+  CHECK (fk.job == 0 || st == SANE_STATUS_GOOD, "the old job is active");
+  CHECK (st == SANE_STATUS_JAMMED, "paper of the old job in the paper path: "
+         "start gave %s (JAMMED expected)", sane_strstatus (st));
+  /* Remove the paper. Then the next job starts. */
+  fk.stuck = 0;
+  load_sheets (1, IMG_H);
+  fk.fed = 0;
+  st = sane_start (H);
+  CHECK (st == SANE_STATUS_GOOD, "start after the paper was removed: %s",
+         sane_strstatus (st));
+  CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF, "read");
+  sane_close (H);
+  return 0;
+}
+
+/* B7: halt-on-cancel, and the D6 reply is lost: the job state is
+   uncertain. The next sane_start ends the old job (D8, D6 on a new
+   connection) and reads C2. Paper of the old job stays in the paper
+   path: no D5 (it would feed this paper into the new job). */
+static int b7p_once;
+static int
+hook_b7p (const unsigned char *cdb, size_t cl, size_t in, struct fk_reply *r)
+{
+  (void) cl;
+  (void) in;
+  if (cdb[0] == 0xD6 && !b7p_once)
+    {
+      b7p_once = 1;
+      r->close_now = 1;
+      return 1;
+    }
+  return 0;
+}
+
+static int
+t_b7_uncertain_path_check (void)
+{
+  SANE_Status st;
+  int d5, i;
+
+  load_sheets (4, IMG_H);
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  i = find_opt ("halt-on-cancel");
+  CHECK (i >= 0 && set_int (i, SANE_TRUE) == SANE_STATUS_GOOD, "halt");
+  CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
+  read_frame (NULL, NULL, 65536);
+  fk.hook = hook_b7p;
+  sane_cancel (H);
+  set_int (i, SANE_TRUE);       /* a safe point for the cancel */
+  CHECK (b7p_once && fk.job == 1, "test error: D6 did not fail");
+  d5 = fk.cnt[0xD5];
+  st = sane_start (H);
+  CHECK (fk.cnt[0xD5] == d5, "D5 with the old paper in the path (start %s)",
+         sane_strstatus (st));
+  CHECK (fk.job == 0, "the old job is still active");
+  CHECK (st == SANE_STATUS_JAMMED, "start gave %s (JAMMED expected)",
+         sane_strstatus (st));
+  /* The paper is still there: the same result again. */
+  st = sane_start (H);
+  CHECK (st == SANE_STATUS_JAMMED && fk.cnt[0xD5] == d5,
+         "second start gave %s", sane_strstatus (st));
+  /* Remove the paper. */
+  fk.stuck = 0;
+  load_sheets (1, IMG_H);
+  fk.fed = 0;
+  st = sane_start (H);
+  CHECK (st == SANE_STATUS_GOOD, "start after the paper was removed: %s",
+         sane_strstatus (st));
+  sane_close (H);
+  return 0;
+}
+
+/* B7: the scanner answers D6 with BUSY one time (it did not do the
+   command). The backend sends D6 again after a short wait: this is not a
+   replay. The end of the stack is then NO_DOCS, not an error. */
+static int b7b_once;
+static int
+hook_b7b (const unsigned char *cdb, size_t cl, size_t in, struct fk_reply *r)
+{
+  (void) cl;
+  (void) in;
+  if (cdb[0] == 0xD6 && !b7b_once)
+    {
+      b7b_once = 1;
+      r->scsi = 8;
+      return 1;
+    }
+  return 0;
+}
+
+static int
+t_b7_d6_busy (void)
+{
+  SANE_Status st;
+
+  load_sheets (1, IMG_H);
+  fk.hook = hook_b7b;
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (sane_start (H) == SANE_STATUS_GOOD, "sheet 1");
+  read_frame (NULL, NULL, 65536);
+  st = sane_start (H);
+  CHECK (b7b_once, "test error: no D6");
+  CHECK (st == SANE_STATUS_NO_DOCS, "end of stack gave %s",
+         sane_strstatus (st));
+  CHECK (fk.job == 0, "the job is still active in the scanner");
+  CHECK (fk.cnt[0xD6] == 2, "%d D6 commands (2 expected)", fk.cnt[0xD6]);
+  sane_close (H);
+  return 0;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Front slot (return path): "Card" sources [HW, PROTOCOL.md]         */
+
+/* Load one sheet into the front slot. */
+static void
+load_front (void)
+{
+  load_sheets (1, IMG_H);
+  fk.front_slot = 1;
+}
+
+static unsigned long
+e9_len (void)
+{
+  return ((unsigned long) fk.e9[8] << 24) | ((unsigned long) fk.e9[9] << 16)
+    | ((unsigned long) fk.e9[10] << 8) | fk.e9[11];
+}
+
+/* "Card Duplex": front-slot E9/D4 values, both sides, one sheet, then
+   NO_DOCS (E0 gives "no paper"). */
+static int
+t_d1_card_duplex (void)
+{
+  static const unsigned char params[14] = {
+    0x00, 0x06, 0x01, 0x01, 0x00, 0x00, 0xC1,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00
+  };
+  SANE_Status st;
+  int f;
+
+  load_front ();
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (set_str (OPT_SOURCE, "Card Duplex") == SANE_STATUS_GOOD,
+         "no Card Duplex source");
+  for (f = 0; f < 2; f++)
+    {
+      st = sane_start (H);
+      CHECK (st == SANE_STATUS_GOOD, "frame %d: sane_start %s", f,
+             sane_strstatus (st));
+      CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF,
+             "frame %d: read", f);
+    }
+  st = sane_start (H);
+  CHECK (st == SANE_STATUS_NO_DOCS, "after one sheet: %s",
+         sane_strstatus (st));
+  CHECK (fk.n_e9 == 1 && e9_len () == 0x4410, "E9 length 0x%lX",
+         e9_len ());
+  CHECK (fk.n_d4 == 1 && !memcmp (fk.d4, params, sizeof (params)),
+         "D4 params %02X %02X %02X %02X %02X", fk.d4[0], fk.d4[1],
+         fk.d4[2], fk.d4[3], fk.d4[4]);
+  CHECK (fk.d4[32 + 1] == 0x10 && fk.d4[31] == 0x30,
+         "the window descriptor changed");
+  CHECK (fk.cnt[0xE0] == 2, "E0 count %d, 2 expected", fk.cnt[0xE0]);
+  CHECK (fk.cnt[0xD5] == 1, "D5 count %d", fk.cnt[0xD5]);
+  CHECK (fk.job == 0, "the job is still active in the scanner");
+  sane_close (H);
+  return 0;
+}
+
+/* "Card Front" and "Card Back": one frame each, then NO_DOCS. */
+static int
+t_d2_card_simplex (void)
+{
+  static const char *src[2] = { "Card Front", "Card Back" };
+  SANE_Status st;
+  int i;
+
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  for (i = 0; i < 2; i++)
+    {
+      load_front ();
+      fk.fed = 0;
+      CHECK (set_str (OPT_SOURCE, src[i]) == SANE_STATUS_GOOD, "no %s",
+             src[i]);
+      st = sane_start (H);
+      CHECK (st == SANE_STATUS_GOOD, "%s: start %s", src[i],
+             sane_strstatus (st));
+      CHECK (read_frame (NULL, NULL, 65536) == SANE_STATUS_EOF,
+             "%s: read", src[i]);
+      st = sane_start (H);
+      CHECK (st == SANE_STATUS_NO_DOCS, "%s: end %s", src[i],
+             sane_strstatus (st));
+      CHECK (fk.job == 0, "%s: the job is still active", src[i]);
+    }
+  CHECK (fk.cnt[0xD5] == 2, "D5 count %d", fk.cnt[0xD5]);
+  sane_close (H);
+  return 0;
+}
+
+/* Card source without front-slot paper: NO_DOCS and no job (no D5).
+   Cases: nothing loaded, only the stale exit bit (byte 2 = 0x00,
+   byte 3 = 0x81), and paper in the chute. */
+static int
+t_d3_card_no_paper (void)
+{
+  SANE_Status st;
+  int i;
+
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (set_str (OPT_SOURCE, "Card Duplex") == SANE_STATUS_GOOD,
+         "no Card Duplex source");
+  for (i = 0; i < 3; i++)
+    {
+      fk.nsheets = 0;
+      fk.front_slot = 0;
+      fk.exit_stale = (i == 1);
+      if (i == 2)
+        load_sheets (1, IMG_H);
+      st = sane_start (H);
+      CHECK (st == SANE_STATUS_NO_DOCS, "case %d: %s", i,
+             sane_strstatus (st));
+      CHECK (fk.cnt[0xD5] == 0 && fk.cnt[0xE0] == 0,
+             "case %d: a job started (D5 %d, E0 %d)", i, fk.cnt[0xD5],
+             fk.cnt[0xE0]);
+    }
+  sane_close (H);
+  return 0;
+}
+
+/* ADF source with only front-slot paper: NO_DOCS, no job, and a DBG
+   hint to select a Card source. */
+static int
+t_d4_adf_front_slot_hint (void)
+{
+  SANE_Status st;
+
+  load_front ();
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  set_str (OPT_SOURCE, "ADF Duplex");
+  h_watch = "select a Card source";
+  st = sane_start (H);
+  CHECK (st == SANE_STATUS_NO_DOCS, "start %s", sane_strstatus (st));
+  CHECK (fk.cnt[0xD5] == 0, "a job started");
+  CHECK (h_watch_seen, "no hint to select a Card source");
+  sane_close (H);
+  return 0;
+}
+
+/* ADF sources keep the top chute values (E9 0x4350, D4 03 .. 88). */
+static int
+t_d5_adf_values_unchanged (void)
+{
+  static const unsigned char params[14] = {
+    0x00, 0x03, 0x01, 0x01, 0x88, 0x00, 0xC1,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00
+  };
+
+  load_sheets (1, IMG_H);
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  CHECK (sane_start (H) == SANE_STATUS_GOOD, "start");
+  read_frame (NULL, NULL, 65536);
+  CHECK (e9_len () == 0x4350, "E9 length 0x%lX", e9_len ());
+  CHECK (!memcmp (fk.d4, params, sizeof (params)), "D4 params %02X %02X",
+         fk.d4[1], fk.d4[4]);
+  sane_cancel (H);
+  sane_close (H);
+  return 0;
+}
+
+/* The source list has the 3 ADF and the 3 Card sources. page-loaded
+   follows the source: the chute for ADF, the front slot for Card. */
+static int
+t_d6_card_options (void)
+{
+  static const char *want[6] = { "ADF Front", "ADF Back", "ADF Duplex",
+    "Card Front", "Card Back", "Card Duplex"
+  };
+  const SANE_Option_Descriptor *d;
+  int i, pl;
+
+  load_front ();
+  CHECK (open_dev () == SANE_STATUS_GOOD, "open failed");
+  d = sane_get_option_descriptor (H, OPT_SOURCE);
+  for (i = 0; i < 6; i++)
+    CHECK (d->constraint.string_list[i]
+           && !strcmp (d->constraint.string_list[i], want[i]),
+           "source %d: %s", i, d->constraint.string_list[i]
+           ? d->constraint.string_list[i] : "(null)");
+  CHECK (!d->constraint.string_list[6], "more than 6 sources");
+  pl = find_opt ("page-loaded");
+  CHECK (pl >= 0, "no page-loaded option");
+  CHECK (get_int (pl) == SANE_FALSE, "ADF: page-loaded with an empty chute");
+  set_str (OPT_SOURCE, "Card Front");
+  CHECK (get_int (pl) == SANE_TRUE, "Card: page-loaded is false");
+  sane_close (H);
+  return 0;
+}
+
 /* Real scanner JPEGs (IXTEST_JPEGS: a list of files). The backend writes
    a smaller height into the SOF marker (as for --ald). The frame must
    decode without a libjpeg warning and agree with a reference decode. */
@@ -1692,6 +2223,9 @@ static const struct test tests[] = {
   {"b2_key0_no_eom", t_b2_key0_no_eom},
   {"b3_cancel_in_decode", t_b3_cancel_in_decode},
   {"b3_cancel_after_sense", t_b3_cancel_after_sense},
+  {"b3_cancel_idle_no_io", t_b3_cancel_idle_no_io},
+  {"b3_cancel_then_option", t_b3_cancel_then_option},
+  {"b3_cancel_signal_in_reply", t_b3_cancel_signal_in_reply},
   {"b4_short_header", t_b4_short_header},
   {"b4_oversize_reply", t_b4_oversize_reply},
   {"b4_progress_refresh", t_b4_progress_refresh},
@@ -1699,6 +2233,7 @@ static const struct test tests[] = {
   {"b4_trickle", t_b4_trickle},
   {"b4_append_wrap", t_b4_append_wrap},
   {"b4_side_limit", t_b4_side_limit},
+  {"b4_cancel_in_payload", t_b4_cancel_in_payload},
   {"b5_truncated_entropy", t_b5_truncated_entropy},
   {"b5_truncated_after_header", t_b5_truncated_after_header},
   {"b5_truncated_offsets", t_b5_truncated_offsets},
@@ -1708,6 +2243,9 @@ static const struct test tests[] = {
   {"b7_idle_reconnect", t_b7_idle_reconnect},
   {"b7_d5_reply_lost", t_b7_d5_reply_lost},
   {"b7_d6_failure", t_b7_d6_failure},
+  {"b7_new_reserve_uncertain", t_b7_new_reserve_uncertain},
+  {"b7_uncertain_path_check", t_b7_uncertain_path_check},
+  {"b7_d6_busy", t_b7_d6_busy},
   {"b8_reserve_lost", t_b8_reserve_lost},
   {"b8_power_trigger", t_b8_power_trigger},
   {"b8_thread_fail", t_b8_thread_fail},
@@ -1729,6 +2267,12 @@ static const struct test tests[] = {
   {"c7_cancel_in_read", t_c7_cancel_in_read},
   {"c8_close_flush", t_c8_close_flush},
   {"c9_uncertain_no_flush", t_c9_uncertain_no_flush},
+  {"d1_card_duplex", t_d1_card_duplex},
+  {"d2_card_simplex", t_d2_card_simplex},
+  {"d3_card_no_paper", t_d3_card_no_paper},
+  {"d4_adf_front_slot_hint", t_d4_adf_front_slot_hint},
+  {"d5_adf_values_unchanged", t_d5_adf_values_unchanged},
+  {"d6_card_options", t_d6_card_options},
   {"real_jpegs", t_real_jpegs},
 };
 

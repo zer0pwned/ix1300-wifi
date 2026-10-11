@@ -57,10 +57,16 @@
      keepalive stops, the scanner frees the reserve. If the scanner does
      not answer the keepalive, or if it sends a power or release event,
      the next sane_start makes a new reserve.
-   - sane_start and sane_read own the scan data while they run. If
-     sane_cancel comes during such a call (for example from a signal
-     handler or a different thread), it only sets a flag. The call that
-     runs stops at the next safe point and frees the data.
+   - sane_start and sane_read own the scan data while they run.
+     sane_cancel only sets a flag, so a signal handler can call it. The
+     call that runs stops at the next safe point (a wait for a Port1
+     reply in sane_start stops in CANCEL_TICK_MS) and ends the job. When
+     no call runs, the next sane_start, sane_read, option change or
+     sane_close ends the job.
+   - If the result of D5 or D6 is not clear (the job is uncertain), the
+     next sane_start sends D8 and D6, and reads C2 before the next D5.
+     Paper of the old job in the paper path stops the new job
+     (SANE_STATUS_JAMMED).
    - The scanner feeds the whole stack in one job (D5 ... D6). The
      frontend sets the page limit (scanimage --batch-count). A cancel
      with sheets left in the job sends D8 (cancel read), then E0. On the
@@ -149,6 +155,17 @@
 
 /* Time for the keepalive replies, in milliseconds. */
 #define KA_WAIT_MS    3000
+
+/* A wait for a Port1 reply in a scan examines the cancel flag at this
+   interval, in milliseconds. */
+#define CANCEL_TICK_MS 100
+
+/* End of a job: the scanner can give BUSY to D8 or D6 (for example while
+   it ends the command of an old connection). BUSY means that the scanner
+   did not do the command. Send the command again after BUSY_WAIT_MS, at
+   most BUSY_TRIES times in all. */
+#define BUSY_TRIES    20
+#define BUSY_WAIT_MS  250
 #define KA_GAP_MS     500
 
 /* The scanner gives the same event again in this time. Ignore it. */
@@ -270,7 +287,7 @@ now_ms (void)
 }
 
 /* Ownership of the scan data and of Port1. sane_start, sane_read,
-   sane_cancel, sane_close and the C2 sensor read take it. A call that
+   sane_close, an option change and the C2 sensor read take it. A call that
    does not get it must not touch the scan data. These functions use only
    atomic operations, so a signal handler can call them. */
 static int
@@ -286,6 +303,28 @@ static void
 own_leave (struct ix1300 *s)
 {
   __atomic_store_n (&s->owner, 0, __ATOMIC_RELEASE);
+}
+
+/* The cancel flag. sane_cancel sets it, also from a signal handler.
+   These functions use only lock-free atomic operations on a
+   sig_atomic_t, so they are safe in a signal handler. */
+static void
+cancel_set (struct ix1300 *s)
+{
+  __atomic_store_n (&s->cancel_req, 1, __ATOMIC_SEQ_CST);
+}
+
+static int
+cancel_pending (struct ix1300 *s)
+{
+  return __atomic_load_n (&s->cancel_req, __ATOMIC_SEQ_CST) != 0;
+}
+
+/* Clear the flag. Return 1 if it was set. */
+static int
+cancel_take (struct ix1300 *s)
+{
+  return __atomic_exchange_n (&s->cancel_req, 0, __ATOMIC_SEQ_CST) != 0;
 }
 
 static void
@@ -890,9 +929,12 @@ send_all (int fd, const unsigned char *buf, size_t len)
 }
 
 /* Receive LEN bytes before DEADLINE (see now_ms). *GOT shows how many
-   bytes arrived. The deadline is for all the bytes, not for each recv. */
+   bytes arrived. The deadline is for all the bytes, not for each recv.
+   If STOP is not NULL, the wait examines *STOP each CANCEL_TICK_MS and
+   after a signal. When *STOP is set, return SANE_STATUS_CANCELLED. */
 static SANE_Status
-recv_all (int fd, unsigned char *buf, size_t len, size_t *got, long deadline)
+recv_all (int fd, unsigned char *buf, size_t len, size_t *got, long deadline,
+          volatile sig_atomic_t *stop)
 {
   size_t n = 0;
 
@@ -900,9 +942,18 @@ recv_all (int fd, unsigned char *buf, size_t len, size_t *got, long deadline)
     {
       struct pollfd pfd;
       long left = deadline - now_ms ();
+      long tick = stop ? CANCEL_TICK_MS : 1000;
       ssize_t r;
       int pr;
 
+      if (stop && __atomic_load_n (stop, __ATOMIC_SEQ_CST))
+        {
+          if (got)
+            *got = n;
+          DBG (5, "recv_all: cancel after %lu of %lu bytes\n",
+               (unsigned long) n, (unsigned long) len);
+          return SANE_STATUS_CANCELLED;
+        }
       if (left <= 0)
         {
           if (got)
@@ -914,7 +965,7 @@ recv_all (int fd, unsigned char *buf, size_t len, size_t *got, long deadline)
       pfd.fd = fd;
       pfd.events = POLLIN;
       pfd.revents = 0;
-      pr = poll (&pfd, 1, left > 1000 ? 1000 : (int) left);
+      pr = poll (&pfd, 1, left > tick ? (int) tick : (int) left);
       if (pr < 0 && errno != EINTR)
         {
           if (got)
@@ -950,10 +1001,12 @@ recv_all (int fd, unsigned char *buf, size_t len, size_t *got, long deadline)
   return SANE_STATUS_GOOD;
 }
 
-/* Connect to a TCP port of the scanner and read the greeting. */
+/* Connect to a TCP port of the scanner and read the greeting. STOP: see
+   recv_all. */
 static SANE_Status
-tcp_open (struct ix1300 *s, int port, int *fdp)
+tcp_open (struct ix1300 *s, int port, int *fdp, volatile sig_atomic_t *stop)
 {
+  SANE_Status ret;
   struct sockaddr_in sa;
   struct timeval tv;
   unsigned char greet[IX_GREET_LEN];
@@ -986,13 +1039,17 @@ tcp_open (struct ix1300 *s, int port, int *fdp)
       return SANE_STATUS_IO_ERROR;
     }
 
-  if (recv_all (fd, greet, sizeof (greet), NULL,
-                now_ms () + cfg.timeout * 1000L) != SANE_STATUS_GOOD
-      || get_be32 (greet + 4) != IX_KEY)
+  ret = recv_all (fd, greet, sizeof (greet), NULL,
+                  now_ms () + cfg.timeout * 1000L, stop);
+  if (ret != SANE_STATUS_GOOD || get_be32 (greet + 4) != IX_KEY)
     {
-      DBG (1, "tcp_open: no correct greeting on port %d\n", port);
+      if (ret != SANE_STATUS_CANCELLED)
+        {
+          DBG (1, "tcp_open: no correct greeting on port %d\n", port);
+          ret = SANE_STATUS_IO_ERROR;
+        }
       close (fd);
-      return SANE_STATUS_IO_ERROR;
+      return ret;
     }
   hexdump (30, "tcp_open: greeting", greet, sizeof (greet));
 
@@ -1008,14 +1065,15 @@ port2_xfer (struct ix1300 *s, const unsigned char *msg, size_t len,
   SANE_Status ret;
   int fd;
 
-  ret = tcp_open (s, s->port2, &fd);
+  ret = tcp_open (s, s->port2, &fd, NULL);
   if (ret != SANE_STATUS_GOOD)
     return ret;
 
   hexdump (30, "port2_xfer: send", msg, len);
   ret = send_all (fd, msg, len);
   if (ret == SANE_STATUS_GOOD)
-    ret = recv_all (fd, reply, rlen, NULL, now_ms () + cfg.timeout * 1000L);
+    ret = recv_all (fd, reply, rlen, NULL, now_ms () + cfg.timeout * 1000L,
+                    NULL);
   if (ret == SANE_STATUS_GOOD)
     {
       hexdump (30, "port2_xfer: reply", reply, rlen);
@@ -1454,7 +1512,10 @@ p1_check_idle (struct ix1300 *s)
    IN_REQ is the data-in length in the frame. IN gets up to IN_CAP bytes
    (IN_CAP >= IN_REQ). A reply with more than IN_REQ + IX_REPLY_SLACK
    bytes is an error. *SCSI gets the SCSI status. The full reply must
-   come in cfg.timeout seconds. */
+   come in cfg.timeout seconds.
+   In the scan I/O of sane_start (s->scan_io), a cancel stops the wait for
+   the reply at once. Then the reply is not complete, so close Port1 and
+   return SANE_STATUS_CANCELLED. The caller must then end the job. */
 static SANE_Status
 do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
           const unsigned char *out, size_t out_len,
@@ -1465,6 +1526,7 @@ do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
   unsigned char rh[IX_P1_REPLY_HDR];
   SANE_Status ret = SANE_STATUS_IO_ERROR;
   unsigned long total, status, dlen;
+  volatile sig_atomic_t *stop = s->scan_io ? &s->cancel_req : NULL;
   long deadline = 0;
   size_t keep;
   int attempt;
@@ -1502,9 +1564,12 @@ do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
     {
       size_t got = 0;
 
+      /* Do not send a new command after a cancel. */
+      if (stop && cancel_pending (s))
+        return SANE_STATUS_CANCELLED;
       if (s->p1_fd < 0)
         {
-          ret = tcp_open (s, s->port1, &s->p1_fd);
+          ret = tcp_open (s, s->port1, &s->p1_fd, stop);
           if (ret != SANE_STATUS_GOOD)
             return ret;
         }
@@ -1512,11 +1577,17 @@ do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
       deadline = now_ms () + cfg.timeout * 1000L;
       ret = send_all (s->p1_fd, frame, IX_P1_HDR + out_len);
       if (ret == SANE_STATUS_GOOD)
-        ret = recv_all (s->p1_fd, rh, sizeof (rh), &got, deadline);
+        ret = recv_all (s->p1_fd, rh, sizeof (rh), &got, deadline, stop);
       if (ret == SANE_STATUS_GOOD)
         break;
 
       p1_close (s);
+      if (ret == SANE_STATUS_CANCELLED)
+        {
+          DBG (5, "do_cmd: cdb %02x: cancel in the wait for the reply\n",
+               cdb[0]);
+          return ret;
+        }
       /* The scanner can have done the command before the reply was lost.
          Send it again only if this is safe. */
       if (attempt || got || !cmd_can_repeat (cdb[0]))
@@ -1555,7 +1626,7 @@ do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
   keep = dlen < in_cap ? dlen : in_cap;
   if (keep)
     {
-      ret = recv_all (s->p1_fd, in, keep, NULL, deadline);
+      ret = recv_all (s->p1_fd, in, keep, NULL, deadline, stop);
       if (ret != SANE_STATUS_GOOD)
         {
           p1_close (s);
@@ -1573,7 +1644,7 @@ do_cmd_x (struct ix1300 *s, const unsigned char *cdb, size_t cdb_len,
       while (rest)
         {
           size_t n = rest < sizeof (junk) ? rest : sizeof (junk);
-          ret = recv_all (s->p1_fd, junk, n, NULL, deadline);
+          ret = recv_all (s->p1_fd, junk, n, NULL, deadline, stop);
           if (ret != SANE_STATUS_GOOD)
             {
               p1_close (s);
@@ -2090,6 +2161,26 @@ flush_paper (struct ix1300 *s)
        now_ms () - start);
 }
 
+/* Send D8 or D6 (6-byte CDB, no data) at the end of a job. BUSY means
+   that the scanner did not do the command, so send it again after a
+   short wait (at most BUSY_TRIES times). This is not a replay: the
+   backend never sends the command again after a lost reply. */
+static SANE_Status
+end_cmd (struct ix1300 *s, const unsigned char *cdb, int *scsi)
+{
+  SANE_Status r;
+  int i;
+
+  for (i = 1;; i++)
+    {
+      r = do_cmd (s, cdb, 6, NULL, 0, NULL, 0, NULL, scsi);
+      if (r != SANE_STATUS_GOOD || *scsi != IX_SCSI_BUSY || i >= BUSY_TRIES)
+        return r;
+      DBG (5, "end_job: cdb %02x: busy, send it again\n", cdb[0]);
+      usleep (BUSY_WAIT_MS * 1000);
+    }
+}
+
 /* End the job. MODE (enum ix1300_end):
    - END_NORMAL: D6. This is the normal end of the stack.
    - END_HALT: D8 (cancel read), then D6. The paper stops in the paper
@@ -2101,7 +2192,9 @@ flush_paper (struct ix1300 *s)
      the next job.
    After a good D6 the job state is JOB_IDLE. If D6 has no clear result,
    the state is JOB_UNCERTAIN, and the next sane_start sends D8 and D6
-   again before a new job. Return the first error. */
+   again before a new job. After the end of an uncertain job, set
+   path_check: the next job_setup reads C2 and does not send D5 while
+   paper of the old job is in the paper path. Return the first error. */
 static SANE_Status
 end_job (struct ix1300 *s, int mode)
 {
@@ -2111,6 +2204,7 @@ end_job (struct ix1300 *s, int mode)
   unsigned char sd[18];
   size_t sl = 0;
   int scsi;
+  int uncertain = (s->job_state == JOB_UNCERTAIN);
 
   if (s->job_state == JOB_IDLE)
     return SANE_STATUS_GOOD;
@@ -2119,7 +2213,7 @@ end_job (struct ix1300 *s, int mode)
        s->job_state == JOB_ACTIVE ? "active" : "uncertain", mode);
   if (mode != END_NORMAL)
     {
-      r = do_cmd (s, d8, sizeof (d8), NULL, 0, NULL, 0, NULL, &scsi);
+      r = end_cmd (s, d8, &scsi);
       if (r == SANE_STATUS_GOOD && scsi == IX_SCSI_CHECK)
         r = request_sense (s, sd, &sl);
       else if (r == SANE_STATUS_GOOD && scsi != IX_SCSI_GOOD)
@@ -2140,7 +2234,7 @@ end_job (struct ix1300 *s, int mode)
         }
     }
 
-  r = do_cmd (s, d6, sizeof (d6), NULL, 0, NULL, 0, NULL, &scsi);
+  r = end_cmd (s, d6, &scsi);
   if (r == SANE_STATUS_GOOD && scsi == IX_SCSI_CHECK)
     {
       r = request_sense (s, sd, &sl);
@@ -2165,6 +2259,8 @@ end_job (struct ix1300 *s, int mode)
     }
 
   s->job_state = JOB_IDLE;
+  if (uncertain)
+    s->path_check = 1;
   free (s->rbuf);
   s->rbuf = NULL;
   DBG (10, "end_job: finish\n");
@@ -2191,10 +2287,11 @@ job_setup (struct ix1300 *s)
   unsigned long width, length;
   int dpi = s->u_res;
   int color = (s->u_mode == MODE_COLOR);
+  int card = IX_SOURCE_IS_CARD (s->u_source);
   SANE_Status ret;
   int scsi;
 
-  DBG (10, "job_setup: start\n");
+  DBG (10, "job_setup: start (%s)\n", card ? "front slot" : "chute");
 
   if (!s->rbuf)
     {
@@ -2214,12 +2311,13 @@ job_setup (struct ix1300 *s)
       request_sense (s, sd, &sl);
     }
 
-  /* E9: pre-read mode. These values work on the iX1300. */
+  /* E9: pre-read mode. These values work on the iX1300. The front slot
+     uses another length [HW]. */
   memset (pre, 0, sizeof (pre));
   put_be16 (pre, dpi);
   put_be16 (pre + 2, dpi);
   put_be32 (pre + 4, IX_MAX_WIDTH_U);
-  put_be32 (pre + 8, IX_PREREAD_LENGTH);
+  put_be32 (pre + 8, card ? IX_FRONT_PREREAD_LENGTH : IX_PREREAD_LENGTH);
   pre[12] = 0x05;
   ret = simple_cmd (s, e9, sizeof (e9), pre, sizeof (pre), NULL, 0, NULL);
   if (ret != SANE_STATUS_GOOD)
@@ -2238,6 +2336,11 @@ job_setup (struct ix1300 *s)
 
   memset (data, 0, sizeof (data));
   memcpy (data, params, sizeof (params));
+  if (card)
+    {
+      data[1] = IX_FRONT_D4_PATH;        /* front slot [HW] */
+      data[4] = IX_FRONT_D4_BYTE4;
+    }
   data[31] = 0x30;                       /* descriptor length */
   desc[1] = 0x10;                        /* JPEG */
   put_be16 (desc + 2, dpi);
@@ -2258,13 +2361,47 @@ job_setup (struct ix1300 *s)
   if (ret != SANE_STATUS_GOOD)
     return ret;
 
-  /* C2: is there paper in the chute? */
+  /* C2: is there paper on the selected path? Before the job: paper in
+     the chute clears the hopper bit. A sheet in the front slot sets the
+     feed sensor bit with an empty hopper [HW]. The exit sensor bit alone
+     is not paper: it can stay set after a halt. */
   ret = get_hw_status (s, hw, sizeof (hw));
   if (ret != SANE_STATUS_GOOD)
     return ret;
-  if (s->hopper_empty)
+  if (card && !(s->hopper_empty && s->paper_feed))
     {
-      DBG (5, "job_setup: no paper in the chute\n");
+      DBG (5, "job_setup: no paper in the front slot%s\n",
+           s->hopper_empty ? "" : " (paper is in the chute; select an "
+           "ADF source)");
+      return SANE_STATUS_NO_DOCS;
+    }
+  if (s->path_check)
+    {
+      /* The old job had no clear result. D8 stops the motor, and D6 does
+         not eject, so paper of the old job can stay in the paper path. D5
+         would feed it into the new job. Paper at the feed sensor with
+         paper in the chute, or with an ADF source, is such paper. A
+         sheet in the front slot also sets the feed sensor bit, thus for
+         a Card source with an empty chute the check cannot see a
+         difference. */
+      if (s->paper_feed && (!card || !s->hopper_empty))
+        {
+          DBG (1, "job_setup: after the end of an uncertain job, paper is "
+               "in the paper path. Open the ADF top section, remove the "
+               "paper, and start again.\n");
+          return SANE_STATUS_JAMMED;
+        }
+      DBG (5, "job_setup: the paper path is clear after the uncertain "
+           "job\n");
+      s->path_check = 0;
+    }
+  if (!card && s->hopper_empty)
+    {
+      if (s->paper_feed)
+        DBG (1, "job_setup: no paper in the chute: paper is in the front "
+             "slot; select a Card source\n");
+      else
+        DBG (5, "job_setup: no paper in the chute\n");
       return SANE_STATUS_NO_DOCS;
     }
 
@@ -2350,7 +2487,7 @@ read_side (struct ix1300 *s, int win, int page, int keep,
       unsigned int key, asc, ascq;
       long now = now_ms ();
 
-      if (s->cancel_req)
+      if (cancel_pending (s))
         return SANE_STATUS_CANCELLED;
       if (now - last > PAPER_WAIT_S * 1000L)
         {
@@ -2509,8 +2646,8 @@ read_sheet (struct ix1300 *s)
 
   DBG (10, "read_sheet: start, sheet %d\n", s->sheet);
 
-  keep[0] = (s->u_source != SOURCE_ADF_BACK);
-  keep[1] = (s->u_source != SOURCE_ADF_FRONT);
+  keep[0] = !IX_SOURCE_IS_BACK (s->u_source);
+  keep[1] = !IX_SOURCE_IS_FRONT (s->u_source);
 
   for (i = 0; i < 2; i++)
     {
@@ -2854,7 +2991,10 @@ init_options (struct ix1300 *s)
   s->source_list[0] = STRING_ADFFRONT;
   s->source_list[1] = STRING_ADFBACK;
   s->source_list[2] = STRING_ADFDUPLEX;
-  s->source_list[3] = NULL;
+  s->source_list[3] = STRING_CARDFRONT;
+  s->source_list[4] = STRING_CARDBACK;
+  s->source_list[5] = STRING_CARDDUPLEX;
+  s->source_list[6] = NULL;
 
   s->mode_list[0] = SANE_VALUE_SCAN_MODE_COLOR;
   s->mode_list[1] = SANE_VALUE_SCAN_MODE_GRAY;
@@ -2920,8 +3060,10 @@ init_options (struct ix1300 *s)
   o = &s->opt[OPT_SOURCE];
   o->name = SANE_NAME_SCAN_SOURCE;
   o->title = SANE_TITLE_SCAN_SOURCE;
-  o->desc = SANE_I18N ("Selects the scan source. With normal loading "
-                       "(print side down), the print is on the back.");
+  o->desc = SANE_I18N ("Selects the scan source. ADF: the paper chute. "
+                       "With normal loading (print side down), the print "
+                       "is on the back. Card: the front slot (return "
+                       "path), one sheet at a time, no long paper.");
   o->type = SANE_TYPE_STRING;
   o->constraint_type = SANE_CONSTRAINT_STRING_LIST;
   o->constraint.string_list = s->source_list;
@@ -3194,7 +3336,12 @@ reserve_check (struct ix1300 *s)
        s->name);
   p1_close (s);
   s->reserved = 0;
-  s->job_state = JOB_IDLE;      /* the scanner has no job of ours */
+  /* After a power cycle the scanner has no job. But if only the
+     keepalive replies were lost, the scanner can still have our job. Thus
+     a job that was not idle is now uncertain: sane_start ends it (D8, D6)
+     on the new connection and reads C2 before the next D5. */
+  if (s->job_state != JOB_IDLE)
+    s->job_state = JOB_UNCERTAIN;
 
   do_search (&s->addr, 1, 0);
   ret = do_reserve (s, &result);
@@ -3213,6 +3360,8 @@ reserve_check (struct ix1300 *s)
 }
 
 /* @@ Section 11 - SANE interface */
+
+static SANE_Status do_cancel (struct ix1300 *s, int mode);
 
 SANE_Status
 sane_init (SANE_Int * version_code, SANE_Auth_Callback authorize)
@@ -3391,10 +3540,12 @@ sane_open (SANE_String_Const name, SANE_Handle * handle)
 
   s->is_open = 1;
   s->present = 1;
-  s->cancel_req = 0;
+  cancel_take (s);
   s->owner = 0;
+  s->scan_io = 0;
   s->started = 0;
   s->job_state = JOB_IDLE;
+  s->path_check = 0;
   *handle = s;
 
   DBG (10, "sane_open: finish\n");
@@ -3510,7 +3661,10 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
           break;
         case OPT_PAGE_LOADED:
           read_sensors (s);
-          *w = s->hopper_empty ? SANE_FALSE : SANE_TRUE;
+          if (IX_SOURCE_IS_CARD (s->u_source))
+            *w = (s->hopper_empty && s->paper_feed) ? SANE_TRUE : SANE_FALSE;
+          else
+            *w = s->hopper_empty ? SANE_FALSE : SANE_TRUE;
           break;
         default:
           return SANE_STATUS_INVAL;
@@ -3525,6 +3679,17 @@ sane_control_option (SANE_Handle handle, SANE_Int option,
     {
       DBG (5, "sane_control_option: option %d is not settable\n", option);
       return SANE_STATUS_INVAL;
+    }
+
+  /* sane_cancel only sets a flag (see sane_cancel). End the job here, so
+     that the frontend can change the options after sane_cancel. */
+  if (cancel_pending (s))
+    {
+      if (!own_enter (s))
+        return SANE_STATUS_DEVICE_BUSY;
+      if (cancel_pending (s) && do_cancel (s, END_CANCEL) != SANE_STATUS_GOOD)
+        DBG (1, "sane_control_option: the job did not end correctly\n");
+      own_leave (s);
     }
 
   /* The options of a job stay the same until the job ends: D4 has the old
@@ -3691,7 +3856,9 @@ sane_get_parameters (SANE_Handle handle, SANE_Parameters * params)
 }
 
 /* Stop the job and free the scan data. Only the owner (see own_enter)
-   can call it. MODE is the end_job mode. Return the result of end_job. */
+   can call it. MODE is the end_job mode. Return the result of end_job.
+   Clear the cancel flag first: a cancel in this function stays set for
+   the next call. A cancel does not stop the I/O of end_job. */
 static SANE_Status
 do_cancel (struct ix1300 *s, int mode)
 {
@@ -3699,6 +3866,8 @@ do_cancel (struct ix1300 *s, int mode)
   int i;
 
   DBG (10, "do_cancel: start\n");
+  cancel_take (s);
+  s->scan_io = 0;
   frame_finish (s);
   for (i = 0; i < 2; i++)
     {
@@ -3706,7 +3875,6 @@ do_cancel (struct ix1300 *s, int mode)
       s->pending[i] = 0;
     }
   ret = end_job (s, mode);
-  s->cancel_req = 0;
   DBG (10, "do_cancel: finish\n");
   return ret;
 }
@@ -3724,7 +3892,10 @@ start_owned (struct ix1300 *s)
   if (s->started)
     frame_finish (s);
 
-  s->cancel_req = 0;
+  /* A sane_cancel when no call ran only set the flag. End that job now,
+     then start a new one. */
+  if (cancel_pending (s) && do_cancel (s, END_CANCEL) != SANE_STATUS_GOOD)
+    DBG (1, "sane_start: the old job did not end correctly\n");
 
   if (!s->pending[0] && !s->pending[1])
     {
@@ -3735,17 +3906,24 @@ start_owned (struct ix1300 *s)
             goto fail;
           if (s->job_state == JOB_UNCERTAIN)
             {
+              /* Bounded recovery: D8 and D6 here, and again in do_cancel
+                 if this fails. Then job_setup reads C2 (path_check)
+                 before D5. No other command goes again. */
               DBG (5, "sane_start: end the old job first\n");
               ret = end_job (s, END_HALT);
               if (s->job_state != JOB_IDLE)
                 goto fail;
             }
+          /* From here, a cancel stops the wait for a reply. */
+          s->scan_io = 1;
           ret = job_setup (s);
           if (ret != SANE_STATUS_GOOD)
             goto fail;
         }
 
+      s->scan_io = 1;
       ret = read_sheet (s);
+      s->scan_io = 0;
       if (ret != SANE_STATUS_GOOD)
         goto fail;
     }
@@ -3764,6 +3942,11 @@ start_owned (struct ix1300 *s)
   return SANE_STATUS_GOOD;
 
 fail:
+  s->scan_io = 0;
+  /* A signal for a cancel can also stop a system call with an error (for
+     example connect with EINTR). Then the cause is the cancel. */
+  if (ret == SANE_STATUS_IO_ERROR && cancel_pending (s))
+    ret = SANE_STATUS_CANCELLED;
   DBG (5, "sane_start: %s\n", sane_strstatus (ret));
   /* At the normal end of the stack, D6 is sufficient (PROTOCOL.md 8.5).
      After a cancel, feed out the rest of the stack (or halt). After an
@@ -3804,9 +3987,10 @@ read_owned (struct ix1300 *s, SANE_Byte * buf, SANE_Int max_len,
 {
   struct ix1300_decoder *d;
 
-  if (s->cancel_req)
+  if (cancel_pending (s))
     {
-      do_cancel (s, END_CANCEL);
+      if (do_cancel (s, END_CANCEL) != SANE_STATUS_GOOD)
+        DBG (1, "sane_read: the job did not end correctly\n");
       return SANE_STATUS_CANCELLED;
     }
   if (!s->started)
@@ -3856,10 +4040,11 @@ read_owned (struct ix1300 *s, SANE_Byte * buf, SANE_Int max_len,
       *len += n;
     }
 
-  if (s->cancel_req)
+  if (cancel_pending (s))
     {
       *len = 0;
-      do_cancel (s, END_CANCEL);
+      if (do_cancel (s, END_CANCEL) != SANE_STATUS_GOOD)
+        DBG (1, "sane_read: the job did not end correctly\n");
       return SANE_STATUS_CANCELLED;
     }
   if (d->failed)
@@ -3894,33 +4079,30 @@ sane_read (SANE_Handle handle, SANE_Byte * buf, SANE_Int max_len,
       return SANE_STATUS_INVAL;
     }
   if (!own_enter (s))
-    return s->cancel_req ? SANE_STATUS_CANCELLED : SANE_STATUS_DEVICE_BUSY;
+    return cancel_pending (s) ? SANE_STATUS_CANCELLED
+      : SANE_STATUS_DEVICE_BUSY;
   ret = read_owned (s, buf, max_len, len);
   own_leave (s);
   return ret;
 }
 
 /* SANE allows a call of sane_cancel at any time, also from a signal
-   handler or a different thread. If a different call owns the scan data,
-   only set the flag: that call stops at its next safe point and frees
-   the data. Else stop the job here. */
+   handler or a different thread. Thus sane_cancel only sets the cancel
+   flag (a lock-free atomic store). It does no I/O, no memory operation
+   and no debug output, because these are not safe in a signal handler.
+   - A sane_start that runs stops at its next safe point: a wait for a
+     Port1 reply stops in CANCEL_TICK_MS (do_cmd_x closes Port1). Then
+     sane_start ends the job (D8, E0, wait, D6) and frees the data.
+   - A sane_read that runs stops after its current line.
+   - When no call runs, the next sane_start, sane_read, sane_close or
+     option change ends the job. */
 void
 sane_cancel (SANE_Handle handle)
 {
   struct ix1300 *s = handle;
 
-  DBG (10, "sane_cancel: start\n");
-
-  s->cancel_req = 1;
-  if (!own_enter (s))
-    {
-      DBG (5, "sane_cancel: a call is in progress, it stops later\n");
-      return;
-    }
-  if (do_cancel (s, END_CANCEL) != SANE_STATUS_GOOD)
-    DBG (1, "sane_cancel: the job did not end correctly\n");
-  own_leave (s);
-  DBG (10, "sane_cancel: finish\n");
+  if (s)
+    cancel_set (s);
 }
 
 void

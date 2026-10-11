@@ -210,14 +210,27 @@ fk_model_cmd (const unsigned char *cdb, size_t cdb_len, size_t in_req,
             hw[2] |= 0x80;
             hw[3] |= 0x01;
           }
-        else if ((fk.cancelled && left > 0) || fk.stuck)
+        else if ((fk.cancelled && !fk.exhausted && left > 0) || fk.stuck)
           {
             /* D8 only: the paper stops in the path and in the chute [HW]. */
             hw[2] |= 0x80;
             hw[3] |= 0x01;
           }
+        else if (fk.front_slot)
+          {
+            /* Front slot sheet [HW]: hopper empty, feed and exit sensors
+               set before the job; a clear path after the sheet. */
+            hw[3] |= 0x80;
+            if (left > 0 && fk.cur < 0)
+              {
+                hw[2] |= 0x80;
+                hw[3] |= 0x01;
+              }
+          }
         else if (left <= (fk.job ? fk.prefetch : 0))
           hw[3] |= 0x80;
+        if (fk.exit_stale)
+          hw[3] |= 0x01;
         fk_reply_data (r, hw, n < sizeof (hw) ? n : sizeof (hw));
         return;
       }
@@ -227,6 +240,7 @@ fk_model_cmd (const unsigned char *cdb, size_t cdb_len, size_t in_req,
         fk.d5_in_job++;
       fk.job = 1;
       fk.cancelled = 0;
+      fk.exhausted = 0;
       fk.stuck = 0;             /* the new job feeds the old paper */
       fk.fed = 0;
       fk.cur = -1;
@@ -236,7 +250,7 @@ fk_model_cmd (const unsigned char *cdb, size_t cdb_len, size_t in_req,
 
     case 0xD6:
       /* After D8 without E0, D6 does not eject: the paper stays [HW]. */
-      if (fk.cancelled)
+      if (fk.cancelled && !fk.exhausted)
         fk.stuck = fk.nsheets - fk.fed;
       fk.job = 0;
       fk.cancelled = 0;
@@ -279,6 +293,8 @@ fk_model_cmd (const unsigned char *cdb, size_t cdb_len, size_t in_req,
           fk.tmp_given[0] = fk.tmp_given[1] = 0;
           return;
         }
+      if (fk.job)
+        fk.exhausted = 1;
       r->scsi = 2;
       fk_set_sense (3, 0x80, 0x03, 0);
       return;
@@ -457,6 +473,20 @@ serve_port1 (int fd)
               free (out);
               return;
             }
+          pthread_mutex_lock (&fk.mu);
+          if (h[48] == 0xE9 && total - 64 <= sizeof (fk.e9))
+            {
+              memset (fk.e9, 0, sizeof (fk.e9));
+              memcpy (fk.e9, out, total - 64);
+              fk.n_e9++;
+            }
+          if (h[48] == 0xD4 && total - 64 <= sizeof (fk.d4))
+            {
+              memset (fk.d4, 0, sizeof (fk.d4));
+              memcpy (fk.d4, out, total - 64);
+              fk.n_d4++;
+            }
+          pthread_mutex_unlock (&fk.mu);
         }
       free (out);
       cdb_len = gbe32 (h + 32);
@@ -494,7 +524,7 @@ serve_port1 (int fd)
             : 40 + dlen);
       memcpy (rh + 4, KEY, 4);
       be32 (rh + 12, (unsigned long) r.scsi);
-      if (wr (fd, rh, 40, r.trickle_ms)
+      if (wr (fd, rh, 40, r.trickle_data_only ? 0 : r.trickle_ms)
           || (r.dlen && wr (fd, r.data, r.dlen, r.trickle_ms)))
         {
           free (r.data);
