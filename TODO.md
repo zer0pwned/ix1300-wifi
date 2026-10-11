@@ -24,11 +24,9 @@ Each item needs the scanner and some paper.
 5. **Other scan modes.** Gray, black and white, 150, 200 and 600 dpi, and
    fixed paper sizes. Only colour at 300 dpi with automatic length is tested.
    First, add these checks to the self-test.
-6. **OCR.** Make a PDF with a text layer from real scans, and examine the
-   text. First, add this check to the self-test.
-7. **SANE backend on the scanner.** The front slot (`Card Duplex`) and a stop
+6. **SANE backend on the scanner.** The front slot (`Card Duplex`) and a stop
    with Ctrl-C during a scan.
-8. **Cover open during a scan** (sense 3/80/02).
+7. **Cover open during a scan** (sense 3/80/02).
 
 ## Software
 

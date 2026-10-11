@@ -1127,6 +1127,9 @@ python3 -m unittest discover -s service/tests
   `00 00` means "never set" (factory value 240 minutes).
 - The service stop during a scan.
 - The registration read over Wi-Fi (`wifi-register-host --show`).
+- OCR with real scans (English): a 10-page document and an 83 cm receipt.
+  The text is correct, with some small errors on receipts (for example a
+  comma for a point). On a Raspberry Pi 5, OCR adds about 8 s for each page.
 
 **Not tested on the scanner yet:**
 
@@ -1137,7 +1140,6 @@ python3 -m unittest discover -s service/tests
 - The effect of a new auto power-off time on the real power-off.
 - Other colour modes (`color`, `gray`), other resolutions (150, 200, 600 dpi),
   and a fixed `length` in mm.
-- OCR with real scans.
 - Some rare error paths of a job, and the trigger codes other than the Scan
   button.
 - The memory use on a Raspberry Pi Zero after the latest changes.
