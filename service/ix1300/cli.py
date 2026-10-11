@@ -1,4 +1,5 @@
-"""Command line: ix1300 discover | status | scan | serve | retry | usb-register-host | usb-wifi-setup."""
+"""Command line: ix1300 discover | status | scan | serve | retry | usb-register-host | wifi-register-host |
+usb-wifi-setup."""
 import argparse
 import getpass
 import logging
@@ -237,6 +238,59 @@ def cmd_usb_register(args):
     return 0
 
 
+def _confirm(prompt):
+    """Ask the user on a terminal. Without a terminal: no."""
+    if not sys.stdin.isatty():
+        return False
+    print(prompt, end="", flush=True)
+    answer = sys.stdin.readline()
+    return answer.strip().lower() in ("y", "yes")
+
+
+def cmd_wifi_register(args):
+    """Register a host ID over Wi-Fi [NV]. Exit codes: 0 OK, 1 error, 2 refused or bad input."""
+    from . import register
+    cfg = _load(args)
+    text = args.host_id or cfg.scanner["host_id"]
+    hid = None
+    if text:
+        try:
+            hid = register.parse_host_id(text)
+        except ValueError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 2
+    elif not args.show:
+        print("error: give --host-id or set scanner.host_id", file=sys.stderr)
+        return 2
+    if not args.show:
+        print(register.CAUTION, file=sys.stderr)
+        if not args.yes and not _confirm("Register host ID %s on the scanner? Type yes: " % hid.hex().upper()):
+            print("not registered: give --yes, or type yes at the prompt", file=sys.stderr)
+            return 2
+    host_ip, host_mac = host_address(cfg)
+    dev = locate(cfg, host_ip, host_mac)
+    if dev is None:
+        print("error: no scanner found", file=sys.stderr)
+        return 1
+    sc = make_scanner(cfg, host_ip, host_mac, dev, host_id=hid or bytes(8))
+
+    def say(msg):
+        print(msg, flush=True)
+        log.debug("wifi-register-host: %s", msg)
+    try:
+        if args.show:
+            register.show(sc, dev, read_dc=hid is not None, say=say)
+            return 0
+        register.register(sc, hid, say=say)
+    except (OSError, IxError) as e:
+        print("error: %s" % short_error(e), file=sys.stderr)
+        return 1
+    finally:
+        sc.close()
+    print("OK. Use host_id = \"%s\" in the configuration." % hid.hex().upper())
+    return 0
+
+
 def cmd_usb_wifi(args):
     from . import usb
     key = None
@@ -288,6 +342,12 @@ def main(argv=None):
     s.add_argument("--host-id", help="16 hex digits (default: scanner.host_id)")
     s.add_argument("--show", action="store_true", help="only show the registered host ID")
     s.set_defaults(fn=cmd_usb_register)
+
+    s = sub.add_parser("wifi-register-host", help="register our host ID over Wi-Fi (not verified on the scanner)")
+    s.add_argument("--host-id", help="16 hex digits (default: scanner.host_id)")
+    s.add_argument("--show", action="store_true", help="only show the registered host ID (no change)")
+    s.add_argument("--yes", action="store_true", help="no question: replace the ID of the other computer")
+    s.set_defaults(fn=cmd_wifi_register)
 
     s = sub.add_parser("usb-wifi-setup", help="connect the scanner to Wi-Fi (USB, one time)")
     s.add_argument("--ssid", required=True)

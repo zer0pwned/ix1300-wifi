@@ -13,7 +13,8 @@ ip = "192.0.2.212"
 broadcast = "255.255.255.255"
 # With a broadcast search: use only the scanner with this name or serial number.
 name = ""
-# Host ID (16 hex digits) that is registered in the scanner. Refer to README, "usb-register-host".
+# Host ID (16 hex digits) that is registered in the scanner. Refer to README, "usb-register-host"
+# and "wifi-register-host".
 host_id = "0123456789ABCDEF"
 # Our IP address and MAC address. Empty: find them from the route to the scanner.
 # With host_ip set, the trigger port listens on this address only.
@@ -47,6 +48,11 @@ max_side_mb = 64
 renew_after_job = false
 # true: release the scanner for 60 s when another host asks for it.
 yield_on_request = true
+# true: when the reserve gives -6 (host ID not registered), register host_id over Wi-Fi,
+# at most once an hour, then reserve again. Not verified on the scanner.
+# Caution: this replaces the ID of any other computer. ScanSnap Home on that computer
+# then registers its own ID again at its next connection. Default: false.
+auto_register = false
 # Seconds between reserve attempts (the time doubles up to retry_max).
 # After a reconnect or a power-on, the service tries again at least each retry_max s.
 retry_min = 2

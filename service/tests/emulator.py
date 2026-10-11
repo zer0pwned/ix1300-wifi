@@ -21,6 +21,15 @@ with zeros), eom_info_error (add this to the information), long_sof
 ("e9": SOF height = E9 length; "window": SOF height = window length, less
 than the real page).
 
+Host ID registration over Wi-Fi [NV] (re/hostid-registration.md 3): one
+registered host ID; a reserve with another ID gives -6, but a reserve with
+mode 2 ("Wi-Fi tool") accepts each ID (accept_mode2). With a mode-2 reserve,
+Port1 DC (HostIDOperation) works: op 0 register, op 1 get data, op 3 clear,
+op 4 get length. The emulator decides these points (not measured): op 0 with
+a registered ID gives result 0x01 (the host must clear first, as ScanSnap
+Home does); DC without a mode-2 reserve gives result 0x18; an unknown op
+gives result 0x02.
+
 D8 in a job (measured, PROTOCOL.md 8.6): the motor stops at once, and a
 READ gives sense 5/24/00. E0 after D8 feeds ALL remaining sheets out
 without a scan (C2 shows paper for eject_time seconds per sheet). D6 after
@@ -38,6 +47,7 @@ import jpegsynth
 from ix1300.protocol import KEY, MUTUAL_READ_SIZE, PREREAD_LENGTH, WINDOW_WIDTH
 
 REGISTERED_ID = bytes.fromhex("0123456789ABCDEF")
+NO_ID = b"\xff" * 8                   # C2 0x20..0x27 when no host ID is registered
 EXEMPT = (0x12, 0xC2, 0xE7, 0xD9, 0xED, 0xE2, 0xE3, 0xE4, 0xE5)
 
 
@@ -127,6 +137,10 @@ class Emulator:
         self.params = None
         self.sense = sense_bytes(0)
         self.cur = None                # current sheet state
+        self.accept_mode2 = True       # a mode-2 reserve accepts an unregistered host ID [NV]
+        self.dc_override = {}          # DC op -> data-in bytes (a test reply)
+        self.dc_ignore_register = False  # DC op 0 gives result 0, but the ID does not change
+        self.dc_log = []               # (op, data-out) of each DC command
 
     # --- life cycle ---
     def start(self):
@@ -350,12 +364,14 @@ class Emulator:
             return -1
         if not 0x10 <= struct.unpack_from(">H", m, 32)[0] <= 0x1F:
             return -5
-        if m[108:116] != self.registered_id:
+        mode = struct.unpack_from(">I", m, 36)[0]
+        if m[108:116] != self.registered_id and not (mode == 2 and self.accept_mode2):
             return -6
         with self.lock:
             if self.occupied_by_other or self.devstatus == 2 or (self.owner and self.owner["mac64"] != mac64):
                 return -4
-            self.owner = dict(mac64=mac64, host_id=m[108:116], peer=peer[0], trigger_port=port, timeout=m[34])
+            self.owner = dict(mac64=mac64, host_id=m[108:116], peer=peer[0], trigger_port=port, timeout=m[34],
+                              mode=mode)
         return 0
 
     # --- Port1 ---
@@ -459,7 +475,40 @@ class Emulator:
             return self._reply(0, 0)
         if op == 0x28:
             return self._read(cdb, inlen)
+        if op == 0xDC:
+            return self._hostid_op(cdb, out, inlen)
         return self._reply(0, 0)
+
+    def has_id(self):
+        return self.registered_id not in (NO_ID, bytes(8))
+
+    def _hostid_op(self, cdb, out, inlen):
+        """DC HostIDOperation: CDB DC 00 OP 00 00 WL 00 RL. Data-in byte 0 = result."""
+        sub = cdb[2]
+        self.dc_log.append((sub, bytes(out)))
+        if sub in self.dc_override:
+            return self._reply(0, 0, self.dc_override[sub][:inlen])
+        res, data = 0, b""
+        if self.owner.get("mode") != 2:
+            res = 0x18
+        elif sub == 0:
+            if len(out) != 16 or out[8:] != bytes(8):
+                res = 0x01
+            elif self.has_id():
+                res = 0x01
+            elif not self.dc_ignore_register:
+                self.registered_id = bytes(out[:8])
+        elif sub == 3:
+            self.registered_id = NO_ID
+        elif sub == 4:
+            data = struct.pack(">HH", 0x18 if self.has_id() else 0, 0)
+        elif sub == 1:
+            data = (self.registered_id if self.has_id() else bytes(8)) + bytes(16)
+        else:
+            res = 0x02
+        if sub in (4, 1) and res == 0:
+            return self._reply(0, 0, data[:inlen])
+        return self._reply(0, 0, (bytes([res]) + bytes(max(0, inlen - 1)))[:inlen])
 
     def _flush(self):
         """E0 after D8: feed out the sheet in the path and all sheets in the chute, no scan."""

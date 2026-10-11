@@ -194,7 +194,34 @@ Caution: the vendor software on another computer registers its own ID when
 it connects. Then the reserve of your host gets -6 again. You can also use
 the ID of that computer, if you know it.
 
-Registration over Wi-Fi is [NV] and not implemented.
+#### Registration over Wi-Fi [NV]
+
+This sequence comes from the vendor software (ScanSnap Home). It was not
+tested on the scanner. The service implements it (`wifi-register-host`,
+`scanner.auto_register`).
+
+1. Read the registered ID with GET HW STATUS (C2 with 0x30 bytes). C2
+   works without a reserve (section 7.3).
+2. Reserve (section 5.3) with mode (+36) = 2 and the new host ID at +108.
+   The vendor software uses mode 2 with an ID that is not registered yet.
+   It is not known if the scanner accepts it.
+3. Port1 `DC 00 03 00 00 00 00 02` (clear, no data-out, 2 bytes in). The
+   vendor software sends it only if the scanner has an ID.
+4. Port1 `DC 00 00 00 00 10 00 02` (register) with 16 bytes data-out: the
+   8-byte ID + 8 zero bytes. 2 bytes in.
+5. Release (section 5.4).
+6. Reserve with mode 0 and the new ID, then release (verify).
+
+CDB of DC (HostIDOperation): `DC 00 OP 00 00 WL 00 RL` (WL = data-out
+length, RL = data-in length). Byte 0 of the data-in is the result. The
+service accepts the result if `byte 0 & 0x7F` is 0 (as on USB).
+
+| OP | CDB | Data-out | Data-in | Meaning |
+|---|---|---|---|---|
+| 0 | `DC 00 00 00 00 10 00 02` | 16 | 2 | Register |
+| 1 | `DC 00 01 00 00 02 00 18` | 2 (index?) | 24 | Read the data |
+| 3 | `DC 00 03 00 00 00 00 02` | 0 | 2 | Clear |
+| 4 | `DC 00 04 00 00 00 00 04` | 0 | 4 | Read the length |
 
 ## 4. Network overview [HW]
 

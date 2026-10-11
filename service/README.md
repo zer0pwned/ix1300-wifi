@@ -45,7 +45,24 @@ docker compose run --rm --user root --privileged -v /dev/bus/usb:/dev/bus/usb \
 - You can use any 16 hex digits. Use the same value in `scanner.host_id`. To make a random ID: `python3 -c "import secrets; print(secrets.token_hex(8).upper())"`.
 - To share the scanner with a Mac that has ScanSnap Home, use the Mac ID. It is the `HostID` value in `~/Library/Application Support/PFU/ScanSnap/PfuSsHostID.plist`. Then you do not need this step, and ScanSnap Home does not register again.
 
-Registration over Wi-Fi is not implemented.
+#### Registration over Wi-Fi (not verified on the scanner)
+
+You can also register the host ID over Wi-Fi, without USB. The scanner must be on and on the network. Stop the service first (the scanner accepts one reserve only).
+
+```
+docker compose run --rm ix1300 wifi-register-host --show
+docker compose run --rm ix1300 wifi-register-host --host-id 0123456789ABCDEF
+```
+
+- `--show` shows the host ID of the last owner (discovery reply), the registered ID (C2), and the DC data (if a mode-2 reserve works). It changes nothing.
+- Without `--host-id`, the command uses `scanner.host_id` from the configuration.
+- The command asks for a confirmation. Type `yes`. Without a terminal, give `--yes`.
+- Sequence: read the registered ID (C2), reserve with mode 2 and the new ID, clear the old ID (only if the scanner has an ID), register the new ID, release, then verify with C2 and a normal reserve. The command shows each step. It does each step one time.
+- The sequence comes from the vendor software. It was not tested on the scanner. If the scanner refuses the mode-2 reserve, use `usb-register-host`.
+
+`scanner.auto_register = true` makes the service do the same registration when a reserve gives -6, at most once an hour. The service logs a WARNING. The default is `false`.
+
+**Caution:** the scanner keeps one registered host ID. A registration (over USB or over Wi-Fi) replaces the ID of any other computer. ScanSnap Home on that computer stops to work with the scanner until it registers again. ScanSnap Home registers again at its next connection, and then this host gets -6 again. With `auto_register = true` on both sides, the two computers take the scanner from each other (at most once an hour from this side). To share the scanner, use the ID of the other computer (see above).
 
 Caution: do not send scan commands over USB while the service uses the scanner over Wi-Fi. After a USB scan command, the network reserve gives -4 until you close and open the cover.
 
@@ -258,7 +275,7 @@ Each job has a lock (`.lock`). The service and `ix1300 retry` take the lock befo
 
 | Problem | Cause and remedy |
 |---|---|
-| Log: "host ID ... is not registered" (-6) | Another computer (ScanSnap Home) registered its own ID. Do step 2.2 again, or use the ID of that computer. |
+| Log: "host ID ... is not registered" (-6) | Another computer (ScanSnap Home) registered its own ID. Do step 2.2 again (USB, or `wifi-register-host`), or use the ID of that computer. `scanner.auto_register = true` registers the ID over Wi-Fi automatically (read the caution in 2.2). |
 | Log: "scanner busy with a USB host or a stale job; close and open the cover" | The reserve gives -4 and the scanner shows device status 2. Close the cover and open it again. Do not use the scanner over USB at the same time. |
 | Log: "scanner occupied by another host" (-4) | Another computer has the reserve. The service tries again (2 s to 10 s, `scanner.retry_min` and `retry_max`). |
 | Log: "double feed: fan the paper and load it again" | The scanner found two sheets together. The service sends nothing for that sheet. Fan the stack, load it again and push Scan. |
@@ -298,6 +315,7 @@ python3 -m unittest discover -s service/tests
 - Error paths of a job: D6 after a lost D5 reply, a release and a new reserve after a failed D6.
 - The button packet is always exactly 48 bytes, and the scanner sends it from its own IP address.
 - Memory use on the Pi Zero after these changes (the test measures Python memory with the emulator: 6 MB peak for a 22-side, 13.8 MB job).
+- Host ID registration over Wi-Fi (`wifi-register-host`, `scanner.auto_register`): the mode-2 reserve with an unregistered ID, the DC commands, and their replies come from the vendor software only. The emulator decides some details (for example: DC op 0 needs a clear first when an ID is registered).
 - Port1 and Port2 over TLS (the scanner shows TLS ports in some modes). The service does not implement TLS.
 - The trigger codes other than the scan button (power on 0x30, power off, release requests).
 - The JPEG files with the fixed height still contain the padded image data. libjpeg shows the warning "extraneous bytes before marker 0xd9". Ghostscript shows these pages correctly (tested with the sample receipts). Other PDF viewers were not tested.

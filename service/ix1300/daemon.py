@@ -22,6 +22,7 @@ import threading
 import time
 
 from . import outputs as outputs_mod
+from . import register as register_mod
 from .config import ConfigError
 from .jobs import FAILED, JOBS, PDF, UNSENT, JobDir, free_mb, keep_raw, list_jobs
 from .net import SystemNet, local_ip_for, mac_for_ip, parse_mac
@@ -98,16 +99,18 @@ def occupied_text(scanner, net=None):
     return "scanner occupied by another host; retry later"
 
 
-def make_scanner(cfg, host_ip, host_mac, dev=None, net=None, trigger_port=None):
+def make_scanner(cfg, host_ip, host_mac, dev=None, net=None, trigger_port=None, host_id=None):
+    """HOST_ID: 8 bytes instead of scanner.host_id (wifi-register-host)."""
     sc = cfg.scanner
-    if cfg.host_id is None:
+    host_id = host_id or cfg.host_id
+    if host_id is None:
         raise IxError("scanner.host_id is not set (see README: usb-register-host)")
     ip = dev.ip if dev else sc.get("ip")
     if not ip:
         raise IxError("no scanner found")
     if dev and dev.tls:
         log.warning("the scanner asks for TLS ports %d/%d; TLS is not implemented", dev.port1, dev.port2)
-    return Scanner(ip, host_ip, host_mac, cfg.host_id,
+    return Scanner(ip, host_ip, host_mac, host_id,
                    port1=dev.port1 if dev else PORT1, port2=dev.port2 if dev else PORT2,
                    trigger_port=trigger_port or int(sc["trigger_port"]), search_port=int(sc["search_port"]),
                    net=net, timeout=float(sc["command_timeout"]), data_timeout=float(sc["data_timeout"]),
@@ -122,6 +125,7 @@ class Service:
     retry_first = 1.0                      # the first examination of work_dir/unsent after the start
     retry_period = 5.0                     # then one examination in this period
     retry_poll = 1.0                       # the retry thread examines the time in this period
+    auto_register_interval = 3600.0        # at most one registration over Wi-Fi in this period
 
     def __init__(self, cfg, net=None, outputs=None, pipeline=None, clock=None, scanner_options=None):
         """CLOCK: a function that gives the time in seconds (default time.monotonic). The service
@@ -167,6 +171,7 @@ class Service:
         self.retry_next = {}               # job ID -> self.clock() of the next attempt
         self.output_locks = {}             # output name -> Lock: one document at a time for each output
         self.stop_deadline = None          # self.clock(): a READ that still waits stops (Scanner.abort)
+        self.auto_register_at = None       # self.clock() of the last registration attempt (auto_register)
         workers = max(1, int(cfg.pipeline.get("workers", 1)))
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ix1300-page")
 
@@ -283,14 +288,14 @@ class Service:
             self.scanner = make_scanner(self.cfg, host_ip, host_mac, dev, self.net, self.trigger_port)
             for name, value in self.scanner_options.items():
                 setattr(self.scanner, name, value)
-            self.scanner.reserve()
+            self._reserve_scanner()
         except ReserveError as e:
             if e.result == -4:
                 self._note(logging.WARNING, "reserve: %s", occupied_text(self.scanner, self.net))
             elif e.result == -6:
                 self._note(logging.ERROR, "reserve: host ID %s is not registered on the scanner. "
-                           "Another computer (ScanSnap Home) registered its ID. Do usb-register-host again, "
-                           "or use the ID of that computer", self.cfg.scanner["host_id"])
+                           "Another computer (ScanSnap Home) registered its ID. Do usb-register-host or "
+                           "wifi-register-host again, or use the ID of that computer", self.cfg.scanner["host_id"])
             else:
                 self._note(logging.ERROR, "%s", e)
             return False
@@ -307,6 +312,37 @@ class Service:
             self.dedup_reset = False
         self.last_error = None
         log.info("reserved scanner %s", self.scanner.ip)
+        return True
+
+    def _reserve_scanner(self):
+        """Reserve. With scanner.auto_register, a result -6 starts one registration over
+        Wi-Fi (at most one in auto_register_interval), then one more reserve."""
+        try:
+            self.scanner.reserve()
+        except ReserveError as e:
+            if e.result != -6 or not self._auto_register():
+                raise
+            self.scanner.reserve()
+
+    def _auto_register(self):
+        """Register scanner.host_id over Wi-Fi [NV]. Return True if the registration is OK."""
+        if not self.cfg.scanner.get("auto_register"):
+            return False
+        now = self.clock()
+        if self.auto_register_at is not None and now - self.auto_register_at < self.auto_register_interval:
+            return False
+        self.auto_register_at = now
+        log.warning("reserve: host ID %s is not registered. scanner.auto_register = true: register it over "
+                    "Wi-Fi now. This replaces the host ID of any other computer (ScanSnap Home there stops "
+                    "to work with the scanner until it registers again)", self.cfg.scanner["host_id"])
+        try:
+            old = register_mod.register(self.scanner, self.cfg.host_id, say=log.info, verify_reserve=False)
+        except (OSError, IxError) as e:
+            log.error("registration over Wi-Fi failed: %s. Next attempt in %.0f s at the earliest",
+                      short_error(e), self.auto_register_interval)
+            return False
+        log.warning("host ID %s registered over Wi-Fi (old ID %s)", self.cfg.scanner["host_id"],
+                    register_mod.fmt(old))
         return True
 
     def _unreserve(self, reset_dedup=False):
