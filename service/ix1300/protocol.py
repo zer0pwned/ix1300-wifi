@@ -42,7 +42,8 @@ READ_SIZE = 0x300000
 # D4 params byte 13 = 0x80: mutual transfer, SetWindow 0x10017e090; firmware flag 0x207f4 [C].
 # The window length stays 0xA543: DoSetWindowInfo 0x100156f00 [C].
 # READ size 0x20000 (MaxTransferSize_of_MutualRead): TelRead 0x3a834 [C].
-# The scanner side of these values is not verified on the hardware [NV].
+# [HW] The scanner accepts these values (an 83 cm receipt, 2026-10-11). A page longer
+# than the window length (about 895 mm) is not tested yet [NV].
 LONG_PREREAD_LENGTH = 0x23680
 LONG_D4_MUTUAL = 0x80
 MUTUAL_READ_SIZE = 0x20000
@@ -568,7 +569,7 @@ class ScanSettings:
         if self.color != "auto":
             params[6] = 0x80             # fixed colour mode (not verified on hardware)
         if self.long_page:
-            params[13] = LONG_D4_MUTUAL      # mutual transfer [NV]
+            params[13] = LONG_D4_MUTUAL      # mutual transfer [HW]
         if not self.double_feed:
             params[4] = 0x00             # no double-feed detection (not verified on hardware)
         desc = bytearray(48)
