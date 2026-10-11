@@ -105,7 +105,7 @@ and API token), a folder, or a webhook address. The file has examples, and
 the service:
 
 ```
-sudo chown 1000:1000 data && chmod 700 data
+sudo chown 1000:1000 data && sudo chmod 700 data
 docker compose up -d
 docker compose logs -f
 ```
