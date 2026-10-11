@@ -1,0 +1,191 @@
+# ix1300 service configuration (TOML).
+# Copy this file to config/config.toml. Change the values for your network.
+# Environment variables can override each value, for example:
+#   IX1300_SCANNER__IP=192.0.2.212
+#   IX1300_OUTPUTS__PAPERLESS__TOKEN=0123abcd
+#   IX1300_OUTPUTS__PAPERLESS__TOKEN_FILE=/run/secrets/paperless_token   (text from a file)
+# The service rejects unknown keys and values that are not correct.
+
+[scanner]
+# Scanner IP address. Empty: find the scanner with a broadcast search.
+ip = "192.0.2.212"
+# Broadcast address for the search (when ip is empty).
+broadcast = "255.255.255.255"
+# With a broadcast search: use only the scanner with this name or serial number.
+name = ""
+# Host ID (16 hex digits) that is registered in the scanner. Refer to README, "usb-register-host".
+host_id = "0123456789ABCDEF"
+# Our IP address and MAC address. Empty: find them from the route to the scanner.
+# With host_ip set, the trigger port listens on this address only.
+host_ip = ""
+host_mac = ""
+# UDP port for button events. The scanner sends them to this port.
+# The service accepts only 48-byte packets from the reserved scanner.
+trigger_port = 55265
+# Seconds between keepalive packets. The scanner releases us after reserve_timeout + 10 s.
+keepalive_interval = 15
+# Wi-Fi power save: in each interval, up to keepalive_repeat packets (0.5 s apart),
+# and a wait of keepalive_wait s for the reply. "Lost" after keepalive_failures intervals without a reply.
+keepalive_failures = 3
+keepalive_wait = 3
+keepalive_repeat = 3
+# After the POWER OFF trigger (auto power-off), no reserve attempt for this time (s).
+power_off_hold = 20
+# While the service waits for the scanner, an INFO line each this number of seconds.
+waiting_log_interval = 600
+# Seconds (1..255) that the scanner keeps the reserve without keepalive. Must be more than keepalive_interval.
+# Also keepalive_interval + keepalive_wait must be less than reserve_timeout + 10.
+reserve_timeout = 30
+# Seconds for one command reply, and without image data in a scan.
+command_timeout = 30
+data_timeout = 60
+# Limits: maximum seconds for one reply frame and for one side, maximum MB of one side.
+frame_timeout = 120
+side_timeout = 600
+max_side_mb = 64
+# false: keep one reserve for all jobs (tested on the scanner). true: release and reserve after each job.
+renew_after_job = false
+# true: release the scanner for 60 s when another host asks for it.
+yield_on_request = true
+# Seconds between reserve attempts (the time doubles up to retry_max).
+# After a reconnect or a power-on, the service tries again at least each retry_max s.
+retry_min = 2
+retry_max = 10
+
+[service]
+# true: read the paper sensor before a job. With an empty chute the service starts no job.
+# (An empty job makes the next 3 s hold return the stacker instead of a long press.)
+check_paper = true
+# Profile for a short press and for a long press of the Scan button.
+# Long press: hold the button until it flashes blue (about 3 s). An empty chute starts no job.
+# Each profile can send to its own outputs (README, "Separate endpoints for each profile").
+short_press_profile = "default"
+long_press_profile = "receipt"
+# Job files: work_dir/jobs (in work), work_dir/unsent (an output failed),
+# work_dir/failed (no PDF, or pages missing), work_dir/raw (keep_raw).
+work_dir = "/data"
+log_level = "INFO"
+# true: send the complete sheets before a paper jam, a double feed or a lost sheet, with a warning.
+# false: send nothing; the sheets stay in work_dir/failed.
+deliver_partial = true
+# The service starts no scan if work_dir has less free space (MB). The scanner feeds
+# the full stack after the start, so the service must decide before the scan.
+min_free_mb = 200
+# The service starts no scan if this number of jobs waits for the PDF or the outputs.
+max_backlog = 3
+# Stop (SIGTERM): a scan can continue for stop_scan_wait s, then the service stops it
+# (D8, E0, D6). CAUTION: then the scanner feeds the rest of the stack out WITHOUT a scan.
+# A READ that still waits for data 10 s before stop_timeout stops (D8, E0, D6, release).
+# After stop_timeout s, the service stops; the next start continues the jobs.
+# Keep stop_timeout less than stop_grace_period in docker-compose.yml.
+# stop_scan_wait must be less than stop_timeout.
+stop_timeout = 60
+stop_scan_wait = 15
+# New attempts for the jobs in work_dir/unsent: first after retry_interval s, then twice
+# as long each time, up to retry_max_interval s. After retry_max_attempts, only "ix1300 retry".
+retry_interval = 60
+retry_max_interval = 3600
+retry_max_attempts = 20
+# true: keep a copy of the scanner JPEGs of each job and the measured values (raw.json)
+# in work_dir/raw/<job ID>, for checks of the image pipeline. Only the newest keep_raw_max_jobs stay.
+# Caution: the copies contain the full documents.
+keep_raw = false
+keep_raw_max_jobs = 20
+
+[pipeline]
+# Blank page detection. "pixels" decodes a small gray copy (Pillow or the djpeg program).
+# "size" uses only the JPEG size (it finds only flat pages). "auto": pixels if possible.
+blank_method = "auto"
+# A page is blank if (dark pixels / paper pixels) is less than this value.
+# Sample receipts: blank sides 0.0003..0.0017, printed sides 0.0086..0.07.
+blank_ink_ratio = 0.004
+# Gray levels: below ink_level = print, above paper_level = paper (the scanner backing is about 215).
+ink_level = 110
+paper_level = 225
+# Size method: JPEG bytes per pixel (gray pages use 60 % of it).
+blank_bytes_per_pixel = 0.01
+# A page with paper length / paper width more than this value is a receipt.
+# The service measures the paper (not the scan window) when it can decode the JPEG.
+receipt_ratio = 2.0
+# Page rotation: "auto" (tesseract orientation detection), or 0, 90, 180, 270.
+rotate = "auto"
+osd_min_confidence = 2.0
+# Straighten skewed pages (needs Pillow; the page gets a new JPEG encode).
+deskew = false
+# Text layer with tesseract.
+ocr = false
+ocr_lang = "eng"
+# strftime format. {profile} is the profile name.
+# Threads for the page work during the scan (blank test, OSD, deskew). Use 1 on a small computer.
+workers = 1
+# JPEG data of all jobs together that stays in memory (MB). More data goes into files in
+# service.work_dir. A 300 dpi colour side is 0.5 to 3.5 MB. This limit is for the JPEG data only:
+# deskew (Pillow), OCR and tesseract use more memory. Refer to README, "Small computers".
+max_memory_mb = 64
+# Seconds for each tesseract run (OSD: each page; OCR: each page of the document).
+tesseract_timeout = 60
+title_format = "Scan {profile} %Y-%m-%d %H:%M:%S"
+# File name for the outputs. "/" and other characters that are not safe become "-".
+filename_format = "scan-%Y%m%d-%H%M%S.pdf"
+
+# Outputs. Each output has a name and a type: paperless, webhook or directory.
+# Common keys: retries (2), retry_delay (5 s), timeout (s for each network operation),
+# max_time (600 s for one attempt), verify_tls (true).
+# Delivery is "at least once": after a lost reply, a receiver can get a document two times.
+# Each request has the job ID (header X-Ix1300-Job; webhook field job_id).
+
+[outputs.paperless]
+type = "paperless"
+url = "http://paperless:8000"
+token = ""                    # or IX1300_OUTPUTS__PAPERLESS__TOKEN
+tags = []                     # tag IDs for all documents
+receipt_tags = []             # tag IDs added for receipts
+correspondent = 0             # 0: not set
+document_type = 0
+receipt_document_type = 0
+retries = 2
+# Added to the title when the scan has a warning (for example a probable jam). "" = off.
+warning_title_suffix = " [scan warning]"
+
+[outputs.webhook]
+type = "webhook"
+url = "http://127.0.0.1:8080/scan"
+field = "file"                # name of the file field in the multipart body
+headers = { Authorization = "Bearer change-me" }
+fields = { source = "ix1300" }
+
+[outputs.local]
+type = "directory"
+path = "/data/out"
+# Mode of the new files and directories (default "0600" and "0700": only the service user).
+# file_mode = "0640"
+# dir_mode = "0750"
+
+# Profiles. The values in comments are the default values.
+# A button press always scans the whole stack. Load only the sheets that you want to scan.
+
+[profiles.default]
+dpi = 300                     # 150, 200, 300 or 600
+color = "auto"                # auto, color or gray
+duplex = true                 # false: one side for each sheet: the side with more print
+paper_face = "down"           # order only: down = back side first (printed side down in the chute)
+blank_skip = true
+length = "auto"               # "auto" (up to 895 mm) or a length in mm
+# rotate = "auto"             # change pipeline.rotate for this profile
+# ocr = false
+# deskew = false              # straighten the page (needs Pillow)
+crop = "auto"                 # cut the page to the paper: auto (receipts only), true, false
+receipt = "auto"              # auto, yes or no
+outputs = ["paperless"]       # empty: all outputs
+
+[profiles.receipt]
+dpi = 300
+color = "auto"
+duplex = false
+blank_skip = true
+length = "auto"
+# deskew decodes the full page with Pillow (much memory on a long receipt). Small computers: false.
+deskew = true
+crop = true
+receipt = "yes"
+outputs = ["paperless"]

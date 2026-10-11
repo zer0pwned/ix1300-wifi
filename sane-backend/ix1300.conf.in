@@ -1,0 +1,42 @@
+# Configuration file for the SANE ix1300 backend.
+# The backend controls a ScanSnap iX1300 on a Wi-Fi network.
+# For more data, read the sane-ix1300(5) manual page.
+#
+# Lines that start with "#" are comments.
+#
+# The scanner feeds the whole stack in one job. Load only the sheets that
+# you want to scan. The frontend sets the page limit (scanimage
+# --batch-count). A cancel feeds out the rest of the stack without a
+# scan; the SANE option --halt-on-cancel stops the paper in the paper
+# path instead. This file has no setting for these functions.
+
+# Scanner addresses.
+# "net auto" sends a UDP broadcast and finds all iX1300 scanners.
+# "net <ip>" sends a probe to one scanner. You can write more than one line.
+net auto
+#net 192.0.2.212
+
+# Host ID (16 hex digits). The scanner keeps one registered host ID.
+# The scanner refuses a host with a different ID (reserve result -6).
+#hostid 0123456789ABCDEF
+
+# Network interface. If you do not set it, the backend uses the route
+# to the scanner.
+#iface wlan0
+
+# The longest time (in seconds) for one complete reply.
+#timeout 30
+
+# The scanner frees the reserve when it gets no keepalive packet for
+# this time plus 10 seconds.
+#reserve-timeout 30
+
+# Time (in seconds) between two keepalive packets. It must be at most
+# reserve-timeout + 5. The backend makes a longer value smaller.
+#keepalive 15
+
+# Time (in milliseconds) that the backend waits for discovery replies.
+#discovery-timeout 3000
+
+# UDP port for scan button packets. 0 lets the system select a port.
+#trigger-port 0

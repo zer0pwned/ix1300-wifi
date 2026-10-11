@@ -1,0 +1,33 @@
+services:
+  ix1300:
+    build:
+      context: .
+      args:
+        WITH_TESSERACT: "1"
+        TESSERACT_LANGS: ""
+        WITH_PILLOW: "1"
+        # The owner of ./data on the host (see README, section 3).
+        UID: "${IX1300_UID:-1000}"
+        GID: "${IX1300_GID:-1000}"
+    image: ix1300-service:latest
+    container_name: ix1300
+    restart: unless-stopped
+    # Time for a clean stop: end the scan, release the scanner, finish the PDF.
+    # Keep it longer than service.stop_timeout (60 s).
+    stop_grace_period: 90s
+    # Host network: the scanner sends UDP replies and button events to the host IP.
+    network_mode: host
+    # Memory limit. Measured on a Pi 5 (8 GB) only. Refer to README, "Small computers".
+    mem_limit: ${IX1300_MEM_LIMIT:-768m}
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      # PDF titles use the local time of the host:
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      IX1300_CONFIG: /config/config.toml
+      # tesseract uses one thread (more threads make a small computer swap).
+      OMP_THREAD_LIMIT: "1"
+      # Secrets can come from the environment or from a file instead of the configuration file:
+      # IX1300_OUTPUTS__PAPERLESS__TOKEN: "0123abcd"
+      # IX1300_OUTPUTS__PAPERLESS__TOKEN_FILE: /run/secrets/paperless_token

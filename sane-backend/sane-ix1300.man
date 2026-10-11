@@ -1,0 +1,291 @@
+.TH sane\-ix1300 5 "10 Oct 2026" "@PACKAGEVERSION@" "SANE Scanner Access Now Easy"
+.IX sane\-ix1300
+.SH NAME
+sane\-ix1300 \- SANE backend for the ScanSnap iX1300 on a Wi\-Fi network
+.SH DESCRIPTION
+The
+.B sane\-ix1300
+library implements a SANE (Scanner Access Now Easy) backend. The backend
+controls a PFU (Fujitsu) ScanSnap iX1300 scanner through the Wi\-Fi
+network. It uses TCP and UDP. It does not use USB.
+.PP
+For USB, use the
+.BR sane\-fujitsu (5)
+backend.
+.PP
+The backend sends the same network commands as the PFU software.
+The scanner sends a JPEG image for each side of a sheet.
+The backend decodes the JPEG data to raw lines.
+
+.SH DEVICE NAMES
+The device name is the IPv4 address of the scanner, for example:
+.PP
+.RS
+ix1300:192.0.2.212
+.RE
+
+.SH HOST ID
+The scanner keeps one registered host ID (8 bytes). The scanner accepts
+commands only from a host that sends this ID. ScanSnap Home registers a
+random ID for each computer.
+.PP
+Write the registered ID in the configuration file with the
+.B hostid
+line. If the ID is not correct, the scanner refuses the reserve with the
+result \-6. Then
+.B sane_open
+gives SANE_STATUS_ACCESS_DENIED, and the debug output shows the ID.
+.PP
+If ScanSnap Home on a different computer connects to the scanner, it
+registers its own ID. Then you must register your ID again.
+
+.SH RESERVE AND KEEPALIVE
+.B sane_open
+sends a reserve to the scanner.
+.B sane_close
+sends a release. While the device is open, a thread sends a keepalive
+packet at intervals. If the backend stops without a release, the scanner
+frees the reserve after the reserve timeout plus 10 seconds.
+.PP
+If a different host has the reserve,
+.B sane_open
+gives SANE_STATUS_DEVICE_BUSY.
+.PP
+If the scanner does not answer a keepalive, or if it sends a power or
+release event, the next
+.B sane_start
+sends a keepalive again. If there is no reply, the backend searches the
+scanner again and makes a new reserve. This is necessary after the
+scanner turns itself off and you turn it on again.
+
+.SH OPTIONS
+.TP
+.B \-\-source "ADF Front" | "ADF Back" | "ADF Duplex"
+Selects the side of the sheet. The backend uses the names of the scanner.
+Window 0 is the front.
+.PP
+.RS
+CAUTION: Usually you load the paper with the printed side down. Then the
+print is on the
+.B back
+side. For a single\-sided document, use
+.BR "\-\-source \(dqADF Back\(dq" .
+.PP
+With "ADF Duplex", the backend gives two frames for each sheet: first the
+front, then the back.
+.RE
+.TP
+.B \-\-mode Color | Gray | Lineart
+Selects the scan mode. Lineart is a software threshold of the gray image.
+.TP
+.B \-\-resolution 150 | 200 | 300 | 600
+Selects the resolution in dpi.
+.TP
+.B \-\-page\-width, \-\-page\-height
+Set the size of the paper in mm. The maximum width is 219.4 mm.
+The maximum height is 895.5 mm. With the maximum height, the scanner
+uses its automatic length.
+.TP
+.B \-l, \-t, \-x, \-y
+Set the scan area in the page. The backend cuts this area from the
+image in software.
+.TP
+.B \-\-threshold 0..255
+In Lineart mode, a pixel with a gray value less than this value is black.
+.TP
+.B \-\-ald yes | no
+Automatic length detection. The default is yes. The scanner finds the end
+of the paper, and the backend removes the empty area after the paper.
+Before
+.BR sane_start ,
+the backend does not know the height. Then the parameters show
+lines = \-1. After
+.BR sane_start ,
+the height is correct.
+.TP
+.B \-\-compression None | JPEG
+None (the default) gives raw lines. JPEG gives the JPEG data of the
+scanner in a frame of type SANE_FRAME_JPEG (11). SANE 1.0 does not have
+this frame type, and most frontends cannot use it.
+.TP
+.B \-\-halt\-on\-cancel yes | no
+Selects what a cancel does with the paper (see
+.BR "PAPER FEED AND CANCEL" ).
+With no (the default), the scanner feeds out the rest of the stack
+without a scan. With yes, the paper stops in the paper path, and you must
+open the ADF top section and remove it. This option has the name and the
+text of the same option of the
+.B fujitsu
+backend.
+.TP
+.B \-\-scan, \-\-long\-press, \-\-page\-loaded
+Sensors (read only). The value of
+.B scan
+is yes one time after a short press of the scan button.
+The value of
+.B long\-press
+is yes one time after a long press (about 3 seconds).
+The value of
+.B page\-loaded
+is yes when there is paper in the paper chute.
+The backend reads the button from the GET HW STATUS command and from the
+trigger packets that the scanner sends to the host. A frontend such as
+.BR scanbd (8)
+can read these options.
+
+.SH CONFIGURATION FILE
+The configuration file is
+.IR @CONFIGDIR@/ix1300.conf .
+Lines that start with "#" are comments. These lines are possible:
+.TP
+.B net auto
+Find scanners with a UDP broadcast to port 52217.
+.TP
+.B net <ip>
+Find the scanner at this address. You can write more than one line.
+.TP
+.B hostid <16 hex digits>
+The registered host ID. If you do not set it, the backend uses the MAC
+address and two zero bytes.
+.TP
+.B iface <name>
+The network interface. If you do not set it, the backend uses the route to
+the scanner.
+.TP
+.B timeout <seconds>
+The longest time for one complete reply. The default is 30.
+.TP
+.B reserve\-timeout <seconds>
+The scanner frees the reserve when it gets no keepalive packet for this
+time plus 10 seconds. The default is 30.
+.TP
+.B keepalive <seconds>
+The time between two keepalive packets. The default is 15. The backend
+makes the value smaller if it is too long for the reserve timeout.
+.TP
+.B discovery\-timeout <milliseconds>
+The time that the backend waits for discovery replies. The default is 3000.
+.TP
+.B trigger\-port <port>
+The UDP port for the scan button packets. The default 0 lets the system
+select a port.
+
+.SH STATUS VALUES
+.TP
+.B SANE_STATUS_NO_DOCS
+The chute is empty: END OF PAPER (sense 3/80/03) for E0 or for the first
+READ of a new sheet, before image data.
+.TP
+.B SANE_STATUS_JAMMED
+A paper jam, a double feed, or a lost sheet (sense 3/80/03 on the back
+side or after image data).
+.TP
+.B SANE_STATUS_IO_ERROR
+No new image data for 60 seconds, a side that is not complete in 600
+seconds, a side larger than 64 MiB, a bad reply, or JPEG data that is not
+complete or not valid. The backend does not add lines that are not in
+the JPEG data.
+.TP
+.B SANE_STATUS_DEVICE_BUSY
+An option change during a job. Call
+.B sane_cancel
+first.
+.PP
+.B sane_cancel
+can come from a signal handler or a different thread. If
+.B sane_start
+or
+.B sane_read
+runs at that time, the call stops at its next safe point and gives
+SANE_STATUS_CANCELLED.
+
+.SH "PAPER FEED AND CANCEL"
+The scanner feeds all sheets in the chute in one job. It does not wait
+for the host, and there is no clean stop after a number of sheets.
+.B Load only the sheets that you want to scan.
+.PP
+The frontend sets the page limit, for example
+.BR "scanimage \-\-batch\-count=N" .
+With "ADF Duplex", each sheet gives two pages. At the end of the stack,
+E0 gives END OF PAPER (sense 3/80/03), and the backend sends END JOB
+(D6) only.
+.PP
+When the frontend stops before the end of the stack, it calls
+.BR sane_cancel .
+.B sane_cancel
+(and
+.B sane_close
+in a job) sends CANCEL READ (D8), then E0. On the iX1300, E0 after D8
+makes the scanner feed out
+.B the rest of the stack without a scan.
+The backend waits until GET HW STATUS (C2) shows an empty chute and a
+clear paper path (at most 120 seconds), then sends D6. After D8, a READ
+gives sense 5/24/00, so the backend sends no READ.
+.PP
+With
+.BR "\-\-halt\-on\-cancel=yes" ,
+.B sane_cancel
+sends D8 and D6 only. The motor stops at once, and D6 does not eject
+paper. A sheet that the scanner already pulled in can stop in the paper
+path, or it can still come out; this depends on how far it was. The rest
+of the stack stays in the chute. If paper stays in the path, open the ADF
+top section and remove it before the next scan.
+.PP
+After an error (for example a paper jam or a timeout), the backend sends
+D8 and D6 only. Remove the paper by hand.
+
+.SH FILES
+.TP
+.I @CONFIGDIR@/ix1300.conf
+The backend configuration file.
+.TP
+.I @LIBDIR@/libsane\-ix1300.so
+The shared library of the backend.
+
+.SH ENVIRONMENT
+.TP
+.B SANE_CONFIG_DIR
+This environment variable specifies the list of directories that can
+contain the configuration file.
+.TP
+.B SANE_DEBUG_IX1300
+If the library was compiled with debug support enabled, this environment
+variable controls the debug level for this backend. Higher values give
+more output. 1 shows errors, 5 shows the important events and the sense
+data, 15 shows each network command, and 30 shows hex dumps.
+
+.SH LIMITS
+.IP \(bu 2
+The backend has no TLS. A scanner in the "RED" or "SEC" mode uses TLS
+ports. The backend cannot use such a scanner.
+.IP \(bu 2
+The backend does not register a host ID. Register the ID over USB first.
+.IP \(bu 2
+The paper must be in the top paper chute (ADF). The front slot (return
+path) is not available.
+.IP \(bu 2
+The maximum page height is 895.5 mm. Long paper mode is not available.
+.IP \(bu 2
+The scanner selects the color automatically. If the scanner sends a gray
+image in Color mode, the backend converts it to RGB.
+.IP \(bu 2
+A paper jam on Wi\-Fi does not always give an error. The page then ends at
+the jam point.
+.IP \(bu 2
+There is no clean stop after N sheets. A cancel feeds out the rest of the
+stack without a scan, or (with
+.BR \-\-halt\-on\-cancel )
+leaves the paper in the paper path.
+.IP \(bu 2
+The backend accepts discovery replies and trigger packets only from the
+address of the scanner. This is a filter on the LAN, not an
+authentication.
+
+.SH "SEE ALSO"
+.BR sane (7),
+.BR sane\-fujitsu (5),
+.BR scanimage (1),
+.BR scanbd (8)
+
+.SH AUTHOR
+The ix1300 backend authors.

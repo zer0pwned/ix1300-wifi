@@ -1,0 +1,49 @@
+# Research material: vendor firmware and binaries, disassembly databases,
+# notes about vendor code, raw findings, reviews. Copyrighted or personal data.
+/re/
+/re.zip
+/review/
+/FINDINGS.md
+
+# Real scans (receipts and letters: personal data)
+/scans/
+
+# Helper tools of the research. Only the two USB setup tools are public.
+/tools/*
+!/tools/ixusb.py
+!/tools/setwifi.py
+
+# Local state of the service
+/service/config/
+/service/data/
+config.toml
+
+# Old copy of the backend for the test harness (not public)
+/sane-backend/tests/orig/
+
+# Build outputs
+/sane-backend/tests/ix1300-test
+/sane-backend/tests/ix1300-test-orig
+*.dSYM/
+*.o
+*.so
+*.so.*
+/sane-backend/sane-backends/
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editors, tools, operating system
+.claude/
+.DS_Store
+*.bak
+*.bak*
+*.log
+*.swp
+*~
+.env
