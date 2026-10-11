@@ -55,5 +55,72 @@ class OcrDurableTest(unittest.TestCase):
         self.assertEqual([n for n in os.listdir(self.jobdir) if n != J.PDF], [])   # no temporary file stays
 
 
+class DamagedRecoveryTest(unittest.TestCase):
+    """Finding B: one damaged job does not stop the recovery of the other jobs."""
+
+    def setUp(self):
+        self.net = make_net()
+        self.emu = Emulator(self.net).start()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.work = self.tmp.name
+        self.cfg = C.load(text=CONFIG % dict(hid=support.HOST_ID, search=self.emu.search_port, work=self.work),
+                          env={})
+        self.out = RecordOutput()
+        self.svc = None
+
+    def tearDown(self):
+        if self.svc:
+            self.svc.stop()
+        self.emu.stop()
+        self.tmp.cleanup()
+
+    def ls(self, kind):
+        try:
+            return sorted(os.listdir(os.path.join(self.work, kind)))
+        except OSError:
+            return []
+
+    def test_missing_side_does_not_stop_the_recovery(self):
+        bad = J.JobDir.create(self.work, "doc")
+        bad.add_sheet(sides(0))
+        bad.m.update(state="scanned", deliver=True)
+        bad.save()
+        os.remove(os.path.join(bad.path, bad.m["sheets"][0]["front"]["file"]))
+        good = J.JobDir.create(self.work, "doc")
+        good.add_sheet(sides(1))
+        good.m.update(state="scanned", deliver=True)
+        good.save()
+        self.svc = make_service(self.cfg, self.net, {"rec": self.out})
+        self.svc.start()
+        self.assertTrue(wait_for(lambda: len(self.out.docs) == 2), "a job was not recovered")
+        by_id = {d.job_id: d for d in self.out.docs}
+        self.assertEqual(by_id[good.id].pages, 2)
+        self.assertEqual(by_id[bad.id].pages, 1)                     # the side that is on the disk
+        self.assertTrue(any("not readable" in w for w in by_id[bad.id].warnings))
+        # The damaged job stays in failed with its remaining original; the intact job goes away.
+        self.assertTrue(wait_for(lambda: self.ls("jobs") == [] and self.ls("failed") == [bad.id]))
+        m = read_json(os.path.join(self.work, "failed", bad.id, J.MANIFEST))
+        self.assertTrue(m["missing"])
+
+    def test_bad_manifest_goes_to_failed_and_the_recovery_continues(self):
+        bad = J.JobDir.create(self.work, "doc")
+        bad.add_sheet(sides(0))
+        bad.m.update(state="scanned", deliver=True, sheets=[{"front": {"dpi": 150}}])   # no file name
+        bad.save()
+        good = J.JobDir.create(self.work, "doc")
+        good.add_sheet(sides(1))
+        good.m.update(state="scanned", deliver=True)
+        good.save()
+        self.svc = make_service(self.cfg, self.net, {"rec": self.out})
+        self.svc.start()
+        self.assertTrue(wait_for(lambda: len(self.out.docs) == 1), "the intact job was not recovered")
+        self.assertEqual(self.out.docs[0].job_id, good.id)
+        self.assertTrue(wait_for(lambda: self.ls("jobs") == [] and self.ls("failed") == [bad.id]))
+        m = read_json(os.path.join(self.work, "failed", bad.id, J.MANIFEST))
+        self.assertIn("recovery failed", m["error"])
+        self.assertEqual(len([n for n in os.listdir(os.path.join(self.work, "failed", bad.id))
+                              if n.endswith(".jpg")]), 2)            # the originals stay
+
+
 if __name__ == "__main__":
     unittest.main()

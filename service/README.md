@@ -710,6 +710,10 @@ with the record:
   `work_dir/failed` after the delivery.
 - One side without the other side stays in the folder. The service does not
   remove it. Examine it, and then remove the job folder yourself.
+- If a side in the record is missing or not readable, the PDF has the other
+  pages. The job stays in `work_dir/failed`.
+- If the service cannot continue a job (for example a bad record), it moves
+  the job to `work_dir/failed` and continues with the next job.
 
 Remove old folders in `failed` yourself when you do not need them.
 
