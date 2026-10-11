@@ -27,6 +27,7 @@ import time
 from . import outputs as outputs_mod
 from . import register as register_mod
 from . import settings as settings_mod
+from . import trace as trace_mod
 from .config import ConfigError
 from .jobs import FAILED, JOBS, PDF, UNSENT, JobDir, free_mb, keep_raw, list_jobs
 from .net import SystemNet, local_ip_for, mac_for_ip, parse_mac
@@ -48,7 +49,7 @@ def host_address(cfg):
     return ip, mac
 
 
-def locate(cfg, host_ip, host_mac, net=None):
+def locate(cfg, host_ip, host_mac, net=None, trace=None):
     """Find the scanner with a search probe. Return a DeviceInfo, or None.
 
     The probe goes as broadcast and, with scanner.ip set, also as unicast
@@ -59,7 +60,7 @@ def locate(cfg, host_ip, host_mac, net=None):
     ip = sc.get("ip") or None
     devs = discover(host_ip, host_mac, target=None, port=int(sc["search_port"]),
                     timeout=float(sc["discovery_timeout"]), net=net,
-                    broadcast=sc.get("broadcast") or "255.255.255.255", unicast=ip)
+                    broadcast=sc.get("broadcast") or "255.255.255.255", unicast=ip, trace=trace)
     want = (sc.get("name") or "").strip()
     for d in devs:
         if "iX1300" not in d.product:
@@ -103,8 +104,8 @@ def occupied_text(scanner, net=None):
     return "scanner occupied by another host; retry later"
 
 
-def make_scanner(cfg, host_ip, host_mac, dev=None, net=None, trigger_port=None, host_id=None):
-    """HOST_ID: 8 bytes instead of scanner.host_id (wifi-register-host)."""
+def make_scanner(cfg, host_ip, host_mac, dev=None, net=None, trigger_port=None, host_id=None, trace=None):
+    """HOST_ID: 8 bytes instead of scanner.host_id (wifi-register-host). TRACE: a trace.Trace or None."""
     sc = cfg.scanner
     host_id = host_id or cfg.host_id
     if host_id is None:
@@ -114,12 +115,14 @@ def make_scanner(cfg, host_ip, host_mac, dev=None, net=None, trigger_port=None, 
         raise IxError("no scanner found")
     if dev and dev.tls:
         log.warning("the scanner asks for TLS ports %d/%d; TLS is not implemented", dev.port1, dev.port2)
-    return Scanner(ip, host_ip, host_mac, host_id,
-                   port1=dev.port1 if dev else PORT1, port2=dev.port2 if dev else PORT2,
-                   trigger_port=trigger_port or int(sc["trigger_port"]), search_port=int(sc["search_port"]),
-                   net=net, timeout=float(sc["command_timeout"]), data_timeout=float(sc["data_timeout"]),
-                   reserve_timeout=int(sc["reserve_timeout"]), frame_timeout=float(sc["frame_timeout"]),
-                   side_timeout=float(sc["side_timeout"]), max_side_bytes=int(sc["max_side_mb"]) << 20)
+    s = Scanner(ip, host_ip, host_mac, host_id,
+                port1=dev.port1 if dev else PORT1, port2=dev.port2 if dev else PORT2,
+                trigger_port=trigger_port or int(sc["trigger_port"]), search_port=int(sc["search_port"]),
+                net=net, timeout=float(sc["command_timeout"]), data_timeout=float(sc["data_timeout"]),
+                reserve_timeout=int(sc["reserve_timeout"]), frame_timeout=float(sc["frame_timeout"]),
+                side_timeout=float(sc["side_timeout"]), max_side_bytes=int(sc["max_side_mb"]) << 20)
+    s.trace = trace
+    return s
 
 
 class Service:
@@ -184,6 +187,7 @@ class Service:
         self.delivery_cond = threading.Condition()
         self.stop_deadline = None          # self.clock(): a READ that still waits stops (Scanner.abort)
         self.auto_register_at = None       # self.clock() of the last registration attempt (auto_register)
+        self.trace = None                  # trace.Trace (service.trace_dir), set in start(); None = off
         workers = max(1, int(cfg.pipeline.get("workers", 1)))
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ix1300-page")
 
@@ -196,6 +200,13 @@ class Service:
         self.trigger_sock = self.net.udp(bind=(sc.get("host_ip") or "", int(sc["trigger_port"])))
         self.trigger_port = self.trigger_sock.getsockname()[1]
         log.info("trigger port %d", self.trigger_port)
+        if self.trace is None:
+            try:
+                self.trace = trace_mod.open_trace(self.cfg, "service")
+            except OSError as e:
+                log.warning("protocol trace not available: %s", e)
+            if self.trace is not None:
+                log.info("protocol trace: %s", self.trace.path)
         self.async_delivery = True
         for name in self.outputs:
             self.queues[name] = outputs_mod.OutputQueue(name, lambda jid, name=name: self._attempt_one(name, jid),
@@ -270,6 +281,8 @@ class Service:
         self.executor.shutdown(wait=False, cancel_futures=True)
         if self.trigger_sock:
             self.trigger_sock.close()
+        if self.trace is not None:
+            self.trace.close()
 
     def wait_idle(self):
         """Wait until the worker has no job and the first delivery of each document is complete."""
@@ -315,12 +328,13 @@ class Service:
             return False
         try:
             host_ip, host_mac = host_address(self.cfg)
-            dev = locate(self.cfg, host_ip, host_mac, self.net)
+            dev = locate(self.cfg, host_ip, host_mac, self.net, trace=self.trace)
             if dev is None:
                 self._note(logging.INFO, "the scanner does not answer the search (off or asleep): waiting. "
                            "Open the scanner cover to turn it on")
                 return False
-            self.scanner = make_scanner(self.cfg, host_ip, host_mac, dev, self.net, self.trigger_port)
+            self.scanner = make_scanner(self.cfg, host_ip, host_mac, dev, self.net, self.trigger_port,
+                                        trace=self.trace)
             for name, value in self.scanner_options.items():
                 setattr(self.scanner, name, value)
             self._reserve_scanner()
@@ -424,6 +438,11 @@ class Service:
                 time.sleep(timeout)
             return None
         trg = parse_trigger(data, src)
+        if self.trace is not None:
+            rec = dict(src="%s:%d" % tuple(src[:2]) if src else "", valid=trg is not None)
+            if trg is not None:
+                rec.update(code=trg.code, seq=trg.seq, long=trg.long_press, reason=trg.reason)
+            self.trace.write("in", "trigger", **self.trace.add_data(rec, data))
         if trg is None:
             log.debug("UDP packet from %s (%d bytes) is not a trigger", src[0] if src else "?", len(data))
             return None

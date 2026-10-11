@@ -85,6 +85,9 @@ DEFAULTS = {
         "keep_raw_max_jobs": 20,
         "check_paper": True,              # read the paper sensor before a job; empty chute: no job
         "continue_window": 0.0,           # seconds: a press of the same profile adds pages (0 = off)
+        "trace_dir": "",                  # protocol trace (JSON lines) into this directory ("" = off)
+        "trace_payload_bytes": 256,       # trace: the longest payload in hex (image data: only a summary)
+        "trace_max_mb": 50,               # trace: a larger file becomes <name>.1, and a new file starts
     },
     "pipeline": {
         "blank_method": "auto",           # auto, pixels, size
@@ -563,7 +566,8 @@ RANGES = {
     "service": {"min_free_mb": (0, None), "max_backlog": (1, 1000), "stop_timeout": (1, 3600),
                 "stop_scan_wait": (0, 3600), "retry_interval": (1, None), "retry_max_interval": (1, None),
                 "retry_max_attempts": (0, None), "keep_raw_max_jobs": (1, 100000),
-                "continue_window": (0, 3600)},
+                "continue_window": (0, 3600), "trace_payload_bytes": (0, 1 << 20),
+                "trace_max_mb": (1, 100000)},
     "pipeline": {"blank_ink_ratio": (0, 1), "ink_level": (1, 255), "paper_level": (1, 255),
                  "blank_bytes_per_pixel": (0, None), "receipt_ratio": (0.1, None), "osd_min_confidence": (0, None),
                  "jpeg_quality": (1, 100), "workers": (1, 16), "max_memory_mb": (0, None),
@@ -572,7 +576,7 @@ RANGES = {
 }
 INTEGER_KEYS = {"search_port", "trigger_port", "keepalive_failures", "keepalive_repeat", "reserve_timeout",
                 "max_side_mb", "max_backlog", "retry_max_attempts", "keep_raw_max_jobs", "ink_level", "paper_level",
-                "jpeg_quality", "workers"}
+                "jpeg_quality", "workers", "trace_payload_bytes"}
 
 
 def _ipv4(v, name):

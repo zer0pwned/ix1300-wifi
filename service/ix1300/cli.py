@@ -1,4 +1,4 @@
-"""Command line: ix1300 discover | status | scan | settings | serve | retry | usb-register-host |
+"""Command line: ix1300 discover | status | scan | settings | serve | retry | selftest | usb-register-host |
 wifi-register-host | usb-wifi-setup."""
 import argparse
 import getpass
@@ -10,6 +10,7 @@ from . import __version__
 from . import config as config_mod
 from . import outputs as outputs_mod
 from . import settings as settings_mod
+from . import trace as trace_mod
 from .daemon import Job, Service, host_address, locate, make_scanner, occupied_text, short_error
 from .jobs import FAILED, UNSENT, list_jobs
 from .pipeline import have_pillow, tesseract_path, write_file
@@ -82,8 +83,18 @@ def cmd_scan(args):
     cfg = _load(args)
     prof = cfg.profile(args.profile or cfg.service["short_press_profile"])
     host_ip, host_mac = host_address(cfg)
-    dev = locate(cfg, host_ip, host_mac)
-    sc = make_scanner(cfg, host_ip, host_mac, dev)
+    trace = trace_mod.open_trace(cfg, "scan")
+    try:
+        dev = locate(cfg, host_ip, host_mac, trace=trace)
+        sc = make_scanner(cfg, host_ip, host_mac, dev, trace=trace)
+        return _scan(cfg, args, prof, sc)
+    finally:
+        if trace is not None:
+            trace.close()
+            print("protocol trace: %s" % trace.path, file=sys.stderr)
+
+
+def _scan(cfg, args, prof, sc):
     try:
         sc.reserve()
     except ReserveError as e:
@@ -219,6 +230,27 @@ def cmd_settings(args):
         except Exception as e:
             log.warning("release failed: %s", e)
     return 0
+
+
+def cmd_selftest(args):
+    """Guided hardware self-test. Exit codes: 0 all PASS or SKIPPED, 1 a FAIL or an error,
+    2 stopped by the user, 3 the scanner is in use by another host."""
+    from . import selftest
+    cfg = _load(args)
+    if cfg.host_id is None:
+        print("error: scanner.host_id is not set", file=sys.stderr)
+        return 2
+    if not sys.stdin.isatty() and not args.no_tty_check:
+        print("error: the self-test needs a terminal (docker compose run --rm ix1300 selftest)", file=sys.stderr)
+        return 2
+    only = [s.strip() for s in (args.steps or "").split(",") if s.strip()] or None
+    try:
+        st = selftest.Selftest(cfg, selftest.TerminalUI(), only=only, button_timeout=args.button_timeout,
+                               install_signals=True, quiet_console=not args.verbose)
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 2
+    return st.run()
 
 
 def cmd_serve(args):
@@ -376,6 +408,12 @@ def main(argv=None):
     g.add_argument("--power-off", metavar="MINUTES",
                    help="set the auto power-off time: 0 = off, else 15..1890 in steps of 15")
     s.set_defaults(fn=cmd_settings)
+
+    s = sub.add_parser("selftest", help="guided hardware self-test (stop the service first)")
+    s.add_argument("--steps", help="only these steps, for example front_slot,stop (default: all)")
+    s.add_argument("--button-timeout", type=float, default=120.0, help="seconds to wait for each press")
+    s.add_argument("--no-tty-check", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_selftest)
 
     s = sub.add_parser("serve", help="run the scan button service")
     s.set_defaults(fn=cmd_serve)

@@ -113,6 +113,12 @@ retry_max_attempts = 20
 # Caution: the copies contain the full documents.
 keep_raw = false
 keep_raw_max_jobs = 20
+# Protocol trace: one JSON line for each message to and from the scanner, in this directory
+# (for example "/data/trace"). Empty: off. Image data is not in the trace (only its length and SHA-256).
+# A file larger than trace_max_mb becomes <name>.1, and a new file starts.
+trace_dir = ""
+trace_payload_bytes = 256
+trace_max_mb = 50
 
 [pipeline]
 # Blank page detection. "pixels" decodes a small gray copy (Pillow or the djpeg program).

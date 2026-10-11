@@ -120,6 +120,8 @@ Environment variables change single values: `IX1300_<SECTION>__<KEY>`, for examp
 
 Limits for bad or slow data from the network (section `[scanner]`): `frame_timeout` (120 s for one reply), `side_timeout` (600 s for one side), `max_side_mb` (64 MB for one side), `data_timeout` (60 s without image data). A reply can be at most the requested length plus 64 bytes.
 
+`service.trace_dir` (default empty = off) writes a protocol trace: one JSON line for each message to and from the scanner (search, keepalive, reserve, release, each Port1 command and reply, each trigger packet). Each start of the service makes a new file `service-<time>-<pid>.jsonl`. Payloads are hex, cut to `trace_payload_bytes` (256). Image data is never in the trace: a READ reply shows only its length, its SHA-256, and its first and last 32 bytes. A file larger than `trace_max_mb` (50) becomes `<name>.1`, and a new file starts. `ix1300 scan` also writes a trace (`scan-<time>-<pid>.jsonl`) when `trace_dir` is set. Refer to section 10 for the line format.
+
 `service.keep_raw = true` keeps a copy of the original sheets of each job (after the height fix, before all other work) in `work_dir/raw/<job ID>`, with `raw.json`: the profile and pipeline settings, the paper path (`top` or `front`), the decoder and OSD programs, and for each side the blank decision and two records. `original` has the size and the measured values of the scanner JPEG (the input of the blank test and the side choice). `delivered` has the page in the PDF: size after crop and deskew, measured values of the cut page (if measured), crop box, measured skew, `deskew_applied`, and the final rotation. `delivered` is `null` for a side that is not in the PDF. Only the newest `keep_raw_max_jobs` (20) directories stay. Caution: the copies contain the full documents.
 
 ### 4.1 Profiles
@@ -341,3 +343,83 @@ python3 -m unittest discover -s service/tests
 - The auto power-off setting (`scanner.power_off_minutes`, `settings` command, PROTOCOL.md 8.9) and `double_feed = false` (PROTOCOL.md 8.2). The command layouts come from the vendor software, not from a hardware test.
 - The trigger codes other than the scan button (power on 0x30, power off, release requests).
 - The JPEG files with the fixed height still contain the padded image data. libjpeg shows the warning "extraneous bytes before marker 0xd9". Ghostscript shows these pages correctly (tested with the sample receipts). Other PDF viewers were not tested.
+
+## 10. Hardware self-test
+
+The self-test is one guided session at the scanner. It examines the functions of section 9 that you can test with paper and the Scan button, and it keeps all data for an analysis later. Thus a failure does not need a second session.
+
+Run the self-test after an update of the service, or when a function of section 9 is new for your scanner. The session takes about 15 minutes.
+
+### 10.1 What you need
+
+- The scanner on, on the network, with the registered host ID of the service.
+- 5 plain sheets (A4 or Letter).
+- Optional: a receipt longer than 90 cm.
+- Optional: 2 sheets that you tape together with an overlap of a few centimetres (a double feed).
+
+### 10.2 Run it
+
+The scanner accepts one host only. Stop the service first, then start the self-test in a terminal:
+
+```
+docker compose build                      # only after an update of the code
+docker stop ix1300
+docker compose run --rm ix1300 selftest
+docker start ix1300
+```
+
+If another host has the scanner, the self-test stops with the message "Stop the service first: docker stop ix1300". It does not change the scanner.
+
+At each step, the terminal shows what to do: what paper to load, and which gesture to use on the Scan button. Then the step runs, and the terminal shows `PASS`, `FAIL` or `SKIPPED` with one line of explanation. The next step starts also after a failure.
+
+- Type `s` and Enter to skip a step. Type `q` and Enter to stop the session.
+- Push Ctrl-C to stop at once. During a scan, the first Ctrl-C ends the job (D8, E0, D6); a second Ctrl-C stops at once. The self-test then releases the scanner and keeps the data.
+- `--steps front_slot,stop` runs only these steps. `--button-timeout 120` is the time for each button press (seconds).
+- Exit codes: 0 all steps `PASS` or `SKIPPED`; 1 a `FAIL`; 2 stopped by the user; 3 the scanner is in use by another host.
+
+### 10.3 The steps
+
+| Step | Paper | What you do | What the step examines |
+|---|---|---|---|
+| `sensors` | none | Enter | Discovery, reserve, INQUIRY, C2 sensors, registered host ID (shows it only) |
+| `power_off` | none | Enter | Auto power-off time: read, set 15 minutes more (15 minutes less at the maximum), read back, set the old value again, verify it |
+| `registration` | none | Enter | Wi-Fi registration data: the answers to the mode-2 reserve and to DC op 4 and op 1. It does not register an ID |
+| `empty_press` | none | Short press | No job with no paper. You tell if the rollers stayed still |
+| `continue` | 2 + 2 sheets | Short press, then load 2 sheets more and push again | Continue scanning: one document with 2 parts, 4 sheets, 8 pages in order |
+| `front_slot` | 1 sheet in the front slot | Short press | A front slot job: 2 sides, the front slot values in E9 and D4. You tell if the sheet came back out at the front |
+| `long_receipt` | a receipt longer than 90 cm (optional) | Long press (hold until the button flashes blue) | Long page mode: a page longer than 900 mm. If the scanner refuses the mode (sense 5/24 or 5/26), the step records the sense, scans again with the automatic length, and shows `FAIL` |
+| `double_feed` | 2 taped sheets (optional) | Enter, two times | Detection on: sense 3/80/07. Detection off: no error |
+| `stop` | 3 sheets (optional) | Enter | The service stop during the first READ: D8, E0, D6, and an empty paper path (C2, on a new Port1 connection). You tell how many sheets came out |
+
+The self-test uses the code of the service (reserve, keepalive, button packets, the scan job, continue scanning, the PDF). So a `PASS` shows that the service works. The self-test uses its own profiles (300 dpi, all pages kept, no rotation, no OCR). It sends no document to the outputs of the configuration, and it does not change `scanner.power_off_minutes`.
+
+### 10.4 The result and the bundle
+
+The self-test writes all data into `work_dir/selftest/<time>/` and packs it into `work_dir/selftest/<time>.tar.gz`. With the Docker setup of section 3, the file is in `data/selftest/` on the host. Send this one file for the analysis.
+
+| File | Contents |
+|---|---|
+| `report.txt` | One line for each step: the result and the reason |
+| `report.json` | All results, the measured values of each step, the log lines (WARNING and higher), the scanner and host data |
+| `selftest.log` | The full debug log of the session |
+| `preflight/trace.jsonl` | The trace of the discovery and the first reserve |
+| `steps/NN-<step>/trace.jsonl` | The protocol trace of the step |
+| `steps/NN-<step>/document-NN.pdf` | The PDF of each document |
+| `steps/NN-<step>/work/raw/<job>/` | The scanner JPEGs and `raw.json` (`keep_raw`) |
+
+Caution: the bundle contains the images of the sheets that you scanned. Use plain sheets.
+
+### 10.5 Trace format
+
+Each line of a trace is one JSON object. All lines have these keys:
+
+| Key | Value |
+|---|---|
+| `n` | Line number in the file |
+| `t`, `wall` | `time.monotonic()` and `time.time()` in seconds |
+| `dir` | `out` (to the scanner), `in` (from the scanner), `conn` (TCP connection), `close` (Port1 closed), `err` (an error in an exchange), `note` (a marker of the self-test) |
+| `port` | `port1`, `port2`, `search`, `keepalive`, `trigger` |
+
+A Port1 command has two lines with the same `x`. The `out` line has `op`, `cdb`, `in_len`, `len` and `data` (the data-out). The `in` line has `status` (frame status), `scsi`, `len` and `data`. For REQUEST SENSE, the `in` line also has `sense` (`key`, `asc`, `ascq`, `eom`, `ili`, `info`). For an image READ, the `in` line has `image` (`len`, `sha256`, `head`, `tail`) and no `data`. `trunc: true` shows a payload that is cut to `trace_payload_bytes`. Port2 lines have `kind` (`reserve mode N`, `release`) and, for the reply, `result`. Trigger lines have `code`, `seq` and `long`. Search replies have the parsed device data.
+
+`tests/replay.py` reads a trace: it gives the command sequence of each job, and it can compare a trace with the emulator.

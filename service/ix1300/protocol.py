@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from . import jpeg
 from .net import SystemNet
+from .trace import is_image_read
 
 log = logging.getLogger("ix1300.protocol")
 
@@ -256,13 +257,14 @@ class DeviceInfo:
 
 
 def discover(host_ip, host_mac, target=None, port=SEARCH_PORT, timeout=3.0, net=None,
-             broadcast="255.255.255.255", unicast=None, repeat=3, interval=0.5):
+             broadcast="255.255.255.255", unicast=None, repeat=3, interval=0.5, trace=None):
     """Search for scanners. Return the list of DeviceInfo replies.
 
     TARGET set: unicast search only; stop at the first reply.
     TARGET None: broadcast search to BROADCAST, and also a unicast probe to
     UNICAST if it is set. A busy scanner does not answer all broadcast
     probes [HW], so each probe goes REPEAT times, INTERVAL s apart, in TIMEOUT.
+    TRACE: a trace.Trace (or None) for the packets.
     """
     net = net or SystemNet()
     sk = net.udp(broadcast=target is None)
@@ -277,6 +279,8 @@ def discover(host_ip, host_mac, target=None, port=SEARCH_PORT, timeout=3.0, net=
             now = time.monotonic()
             if sent < max(1, repeat) and now >= start + sent * interval:
                 for d in dests:
+                    if trace is not None:
+                        trace.write("out", "search", to="%s:%d" % (d, port), data=pkt.hex())
                     try:
                         sk.sendto(pkt, (d, port))
                     except OSError as e:
@@ -294,6 +298,12 @@ def discover(host_ip, host_mac, target=None, port=SEARCH_PORT, timeout=3.0, net=
             except socket.timeout:
                 continue
             dev = DeviceInfo.parse(data, src)
+            if trace is not None:
+                rec = dict(src="%s:%d" % tuple(src[:2]) if src else "", valid=dev is not None)
+                if dev is not None:
+                    rec.update(ip=dev.ip, name=dev.name, serial=dev.serial, owner_ip=dev.owner_ip,
+                               owner_id=dev.owner_id, devstatus=dev.devstatus, tls=dev.tls)
+                trace.write("in", "search", **trace.add_data(rec, data))
             if dev and src and src[0] not in (dev.ip, target, unicast):
                 log.debug("search reply from %s for %s: ignored (address does not agree)", src[0], dev.ip)
                 dev = None
@@ -306,7 +316,8 @@ def discover(host_ip, host_mac, target=None, port=SEARCH_PORT, timeout=3.0, net=
     return found
 
 
-def keepalive(scanner_ip, host_ip, host_mac, port=SEARCH_PORT, timeout=3.0, net=None, repeat=3, interval=0.5):
+def keepalive(scanner_ip, host_ip, host_mac, port=SEARCH_PORT, timeout=3.0, net=None, repeat=3, interval=0.5,
+              trace=None):
     """Send a keepalive. Return True if the scanner answered (12 bytes, 80 01).
 
     A scanner in Wi-Fi power-save mode can lose packets and answer late [HW].
@@ -322,6 +333,8 @@ def keepalive(scanner_ip, host_ip, host_mac, port=SEARCH_PORT, timeout=3.0, net=
         sent = 0
         while True:
             if sent < max(1, repeat) and time.monotonic() >= start + sent * interval:
+                if trace is not None:
+                    trace.write("out", "keepalive", to="%s:%d" % (scanner_ip, port), data=pkt.hex())
                 try:
                     sk.sendto(pkt, (scanner_ip, port))
                 except OSError as e:
@@ -338,6 +351,9 @@ def keepalive(scanner_ip, host_ip, host_mac, port=SEARCH_PORT, timeout=3.0, net=
                 data, src = sk.recvfrom(256)
             except socket.timeout:
                 continue
+            if trace is not None:
+                trace.write("in", "keepalive", **trace.add_data(dict(src="%s:%d" % tuple(src[:2]) if src else ""),
+                                                                data))
             if src and src[0] != scanner_ip:
                 log.debug("keepalive reply from %s: ignored", src[0])
                 continue
@@ -626,20 +642,36 @@ class Scanner:
         self.abort_poll = 0.2                       # a READ that waits for its reply examines abort() this often
         self.stop_cmd_timeout = 5.0                 # after Stopped: the longest wait for each reply (D8, E0, C2, D6)
         self._cmd_limit = None                      # this limit, while it is set
+        self.trace = None                           # trace.Trace: one JSON line for each message (None = off)
 
     # Connections
     def _timeout(self, t):
         return t if self._cmd_limit is None else min(t, self._cmd_limit)
 
+    def _port_name(self, port):
+        return "port1" if port == self.port1 else "port2" if port == self.port2 else str(port)
+
     def _connect(self, port):
         timeout = self._timeout(self.timeout)
-        sk = self.net.tcp_connect((self.ip, port), timeout)
+        tr = self.trace
+        try:
+            sk = self.net.tcp_connect((self.ip, port), timeout)
+        except Exception as e:
+            if tr is not None:
+                tr.write("conn", self._port_name(port), to="%s:%d" % (self.ip, port), ok=False, error=str(e))
+            raise
         try:
             sk.settimeout(timeout)
             greet = recv_exact(sk, 16)
-        except Exception:
+        except Exception as e:
             sk.close()
+            if tr is not None:
+                tr.write("conn", self._port_name(port), to="%s:%d" % (self.ip, port), ok=False,
+                         error="greeting: %s" % (str(e) or e.__class__.__name__))
             raise
+        if tr is not None:
+            tr.write("conn", self._port_name(port), to="%s:%d" % (self.ip, port), ok=greet[4:8] == KEY,
+                     greeting=greet.hex())
         if greet[4:8] != KEY:
             sk.close()
             raise ProtocolError("bad greeting %s" % greet.hex(" "))
@@ -647,6 +679,8 @@ class Scanner:
 
     def close(self):
         if self.p1 is not None:
+            if self.trace is not None:
+                self.trace.write("close", "port1")
             try:
                 self.p1.close()
             finally:
@@ -659,11 +693,36 @@ class Scanner:
         self.close()
 
     # Port2
+    @staticmethod
+    def _port2_kind(msg):
+        code = struct.unpack_from(">I", msg, 8)[0] if len(msg) >= 12 else 0
+        if code == 0x11 and len(msg) >= 40:
+            return "reserve mode %d" % struct.unpack_from(">I", msg, 36)[0]
+        if code == 0x12 and len(msg) >= 28:
+            return "release" + (" force" if struct.unpack_from(">I", msg, 24)[0] else "")
+        return "0x%X" % code
+
     def _port2(self, msg, replylen):
         sk = self._connect(self.port2)
+        tr = self.trace
+        x = kind = None
+        if tr is not None:
+            x, kind = tr.next_x(), self._port2_kind(msg)
         try:
+            if tr is not None:
+                tr.write("out", "port2", x=x, kind=kind, **tr.add_data({}, msg))
             sk.sendall(msg)
-            return recv_exact(sk, replylen)
+            rep = recv_exact(sk, replylen)
+            if tr is not None:
+                rec = tr.add_data({}, rep)
+                if len(rep) >= 12:
+                    rec["result"] = struct.unpack_from(">i", rep, 8)[0]
+                tr.write("in", "port2", x=x, kind=kind, **rec)
+            return rep
+        except Exception as e:
+            if tr is not None:
+                tr.write("err", "port2", x=x, kind=kind, error=str(e) or e.__class__.__name__)
+            raise
         finally:
             sk.close()
 
@@ -707,7 +766,8 @@ class Scanner:
         return struct.unpack_from(">i", rep, 8)[0]
 
     def keepalive(self, timeout=3.0, repeat=3, interval=0.5):
-        return keepalive(self.ip, self.host_ip, self.host_mac, self.search_port, timeout, self.net, repeat, interval)
+        return keepalive(self.ip, self.host_ip, self.host_mac, self.search_port, timeout, self.net, repeat, interval,
+                         trace=self.trace)
 
     # Port1
     def cmd(self, cdb, out=b"", inlen=0, stop=None):
@@ -728,6 +788,13 @@ class Scanner:
         struct.pack_into(">III", h, 32, len(cdb), inlen, len(out))
         h[48:48 + len(cdb)] = bytes(cdb)
         deadline = time.monotonic() + self._timeout(self.frame_timeout)
+        tr = self.trace
+        if tr is not None:
+            x = tr.next_x()
+            cdb_b = bytes(cdb)
+            op = "%02X" % cdb_b[0]
+            tr.write("out", "port1", x=x, op=op, cdb=cdb_b.hex(), in_len=inlen,
+                     **tr.add_data({}, out))
         try:
             self.p1.sendall(bytes(h) + bytes(out))
             rh = recv_exact(self.p1, 40, deadline, stop, self.abort_poll)
@@ -738,9 +805,19 @@ class Scanner:
             if total - 40 > inlen + REPLY_SLACK:
                 raise ProtocolError("command %02X: reply of %d bytes for %d requested" % (cdb[0], total - 40, inlen))
             data = recv_exact(self.p1, total - 40, deadline, stop, self.abort_poll) if total > 40 else b""
-        except (OSError, IxError):
+        except (OSError, IxError) as e:
+            if tr is not None:
+                tr.write("err", "port1", x=x, op=op, error=str(e) or e.__class__.__name__,
+                         kind=e.__class__.__name__)
             self.close()
             raise
+        if tr is not None:
+            rec = dict(x=x, op=op, status=st, scsi=scsi)
+            tr.add_data(rec, data, image=is_image_read(cdb_b) and scsi in (0, 2) and len(data) > 2)
+            if cdb_b[0] == 0x03 and scsi == 0 and len(data) >= 14:
+                sn = Sense(data)
+                rec["sense"] = dict(key=sn.key, asc=sn.asc, ascq=sn.ascq, eom=sn.eom, ili=sn.ili, info=sn.info)
+            tr.write("in", "port1", **rec)
         if st != 0:
             raise ProtocolError("command %02X: frame status %d" % (cdb[0], st))
         return scsi, data
