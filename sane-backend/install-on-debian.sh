@@ -4,28 +4,39 @@
 # Usage: sudo ./install-on-debian.sh [SANE_SOURCE_DIR]
 #
 # The script does these steps:
-#  1. It installs the build packages with apt.
+#  1. It installs the SANE programs (scanimage) and the build packages with apt.
 #  2. It gets the sane-backends 1.3.1 source (git tag 1.3.1).
 #  3. It adds the ix1300 backend to the source tree.
 #  4. It builds only the ix1300 backend.
 #  5. It installs the library, the configuration file and the manual page.
 #
-# Set NO_APT=1 to skip step 1. Set HOSTID=<16 hex digits> to write the
-# host ID into a new /etc/sane.d/ix1300.conf.
+# Set NO_APT=1 to skip step 1. Then these packages must be on the computer:
+# sane-utils, libsane1, git, autoconf, autoconf-archive, automake, libtool,
+# gettext, autopoint, pkg-config, build-essential, dpkg-dev and
+# libjpeg62-turbo-dev. Set HOSTID=<16 hex digits> to write the host ID into
+# a new /etc/sane.d/ix1300.conf.
 
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=${1:-$HERE/sane-backends}
 TAG=1.3.1
-MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch)
-SANEDIR=/usr/lib/$MULTIARCH/sane
 
-echo "== 1. Build packages"
+echo "== 1. SANE programs and build packages"
 if [ -z "$NO_APT" ]; then
-  apt-get install -y git autoconf autoconf-archive automake libtool gettext \
-    autopoint pkg-config build-essential libjpeg62-turbo-dev
+  apt-get update
+  apt-get install -y sane-utils libsane1 git autoconf autoconf-archive \
+    automake libtool gettext autopoint pkg-config build-essential dpkg-dev \
+    libjpeg62-turbo-dev
 fi
+
+# Find the architecture after step 1: dpkg-dev and gcc come from step 1.
+MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || gcc -print-multiarch 2>/dev/null || true)
+if [ -z "$MULTIARCH" ]; then
+  echo "error: cannot find the architecture (install dpkg-dev or gcc)" >&2
+  exit 1
+fi
+SANEDIR=/usr/lib/$MULTIARCH/sane
 
 echo "== 2. sane-backends source ($SRC)"
 if [ ! -d "$SRC/.git" ]; then
@@ -61,6 +72,7 @@ make -C doc sane-ix1300.5
 
 echo "== 5. Install"
 SO=$(ls backend/.libs/libsane-ix1300.so.1.*.* | head -1)
+install -d "$SANEDIR" /etc/sane.d /usr/share/man/man5
 install -m 644 "$SO" "$SANEDIR/"
 ln -sf "$(basename "$SO")" "$SANEDIR/libsane-ix1300.so.1"
 if [ ! -f /etc/sane.d/ix1300.conf ]; then

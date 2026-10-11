@@ -83,7 +83,7 @@ You do the USB steps only one time. After that, the scanner works over Wi-Fi.
 cd service
 mkdir -p config data
 cp config.example.toml config/config.toml
-sudo chown 1000:1000 data && chmod 700 data
+sudo chown 1000:1000 data && sudo chmod 700 data
 docker compose build
 ```
 

@@ -55,7 +55,8 @@ sudo HOSTID=0123456789ABCDEF ./install-on-debian.sh
 
 The script does these steps:
 
-1. It installs the build packages with `apt`.
+1. It installs the SANE programs (`scanimage`) and the build packages with
+   `apt`.
 2. It downloads the sane-backends 1.3.1 source into `sane-backend/sane-backends`.
 3. It adds the `ix1300` backend to that source.
 4. It builds only the `ix1300` backend.
@@ -66,8 +67,12 @@ The script writes `/etc/sane.d/ix1300.conf` only if that file does not exist.
 It writes the host ID only into a new file. If the file already exists, add
 the host ID yourself (see "Configure").
 
-The script has two more settings. Set `NO_APT=1` if the build packages are
-already on the computer. Give a folder as the first argument if you already
+The script has two more settings. Set `NO_APT=1` if the packages are
+already on the computer. Then the script does not use `apt`, and these
+Debian packages must be installed: `sane-utils`, `libsane1`, `git`,
+`autoconf`, `autoconf-archive`, `automake`, `libtool`, `gettext`,
+`autopoint`, `pkg-config`, `build-essential`, `dpkg-dev` and
+`libjpeg62-turbo-dev`. Give a folder as the first argument if you already
 have a sane-backends 1.3.1 source tree.
 
 When the script finishes, find the scanner:

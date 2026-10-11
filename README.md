@@ -105,7 +105,7 @@ and API token), a folder, or a webhook address. The file has examples, and
 the service:
 
 ```
-sudo chown 1000:1000 data && chmod 700 data
+sudo chown 1000:1000 data && sudo chmod 700 data
 docker compose up -d
 docker compose logs -f
 ```
@@ -179,7 +179,7 @@ the details.
 |---|---|
 | [`service/`](service/README.md) | The scan service (Python, Docker) and its tests |
 | [`sane-backend/`](sane-backend/README.md) | The SANE backend, the patch for sane-backends 1.3.1, and its tests |
-| `tools/` | Two small USB tools for the one-time setup without Docker |
+| `tools/` | Two small USB tools for the one-time setup without Docker. They use `service/ix1300/usb.py` and need only Python 3 and libusb-1.0 |
 | [`PROTOCOL.md`](PROTOCOL.md) | How the scanner talks over USB and Wi-Fi |
 
 The tests need no scanner and no network:
