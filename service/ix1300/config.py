@@ -81,6 +81,7 @@ DEFAULTS = {
         "keep_raw": False,                # keep a copy of the scanner JPEGs in work_dir/raw
         "keep_raw_max_jobs": 20,
         "check_paper": True,              # read the paper sensor before a job; empty chute: no job
+        "continue_window": 0.0,           # seconds: a press of the same profile adds pages (0 = off)
     },
     "pipeline": {
         "blank_method": "auto",           # auto, pixels, size
@@ -555,7 +556,8 @@ RANGES = {
                 "retry_min": (0.01, 3600), "retry_max": (0.01, 86400)},
     "service": {"min_free_mb": (0, None), "max_backlog": (1, 1000), "stop_timeout": (1, 3600),
                 "stop_scan_wait": (0, 3600), "retry_interval": (1, None), "retry_max_interval": (1, None),
-                "retry_max_attempts": (0, None), "keep_raw_max_jobs": (1, 100000)},
+                "retry_max_attempts": (0, None), "keep_raw_max_jobs": (1, 100000),
+                "continue_window": (0, 3600)},
     "pipeline": {"blank_ink_ratio": (0, 1), "ink_level": (1, 255), "paper_level": (1, 255),
                  "blank_bytes_per_pixel": (0, None), "receipt_ratio": (0.1, None), "osd_min_confidence": (0, None),
                  "jpeg_quality": (1, 100), "workers": (1, 16), "max_memory_mb": (0, None),

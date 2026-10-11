@@ -160,6 +160,7 @@ class Service:
         self.wait_logged = 0.0
         self.ignored_sources = set()
         self.documents = []                # data of the last documents (no PDF data), newest last
+        self.held = None                   # Held: the document that waits for more parts (continue_window)
         self.scans = 0
         self.stop_at = None
         self.stopped = False
@@ -368,12 +369,14 @@ class Service:
                     self._unreserve()
                     self.stop_event.wait(self.error_pause)
         finally:
+            self._deliver_held("service stop")
             if self.reserved and self.scanner is not None:
                 self._release()
                 log.info("released the scanner")
 
     def _main_step(self):
         sc = self.cfg.scanner
+        self._continue_tick()
         if not self.reserved:
             if self._try_reserve():
                 self.delay = float(sc["retry_min"])
@@ -383,6 +386,7 @@ class Service:
             end = self.clock() + delay
             self.delay = min(delay * 2, float(sc["retry_max"]))
             while not self.stop_event.is_set() and self.clock() < end:
+                self._continue_tick()
                 trg = self._recv_trigger(min(self.trigger_poll, max(0.01, end - self.clock())))
                 if trg and trg.code == TRG_POWER_ON and self.dedup.is_new(trg):
                     log.info("scanner power on")
@@ -506,6 +510,10 @@ class Service:
         stops the scan before the first complete sheet, no document is made.
         A sheet in the front slot (and no paper in the chute) gives a front slot
         job, with service.front_slot_profile if it is set.
+
+        Continue scanning (service.continue_window > 0): a document that waits
+        (self.held) gets the sheets of a press with the same button profile as a
+        new part. A press with another profile delivers it first (_continue_part).
         """
         if not self._admit():
             return None
@@ -519,19 +527,25 @@ class Service:
                             press)
                 return None
             path = "top"                       # check_paper = false: E0 decides
-        if path == "front" and self.cfg.service.get("front_slot_profile"):
+        key = profile_name                     # the button profile: the same key adds a part
+        held = self._continue_part(key)
+        if held is not None:
+            profile_name = held.job.profile.name
+        elif path == "front" and self.cfg.service.get("front_slot_profile"):
             profile_name = self.cfg.service["front_slot_profile"]
-        log.info("scan button (%s press): profile %s, %s", press, profile_name,
-                 "front slot" if path == "front" else "top chute")
+        log.info("scan button (%s press): profile %s, %s%s", press, profile_name,
+                 "front slot" if path == "front" else "top chute", ": continue scanning" if held else "")
         try:
-            profile = self.cfg.profile(profile_name)
+            profile = held.job.profile if held else self.cfg.profile(profile_name)
             settings = profile.scan_settings(path)
-            job = Job(self, profile, paper_path=path)
+            job = held.job if held else Job(self, profile, paper_path=path)
+            part = job.begin_part(path)
             if settings.long_page:
                 job.dir.m["long_page"] = True
         except (OSError, ConfigError, ValueError) as e:
             log.error("scan not started: %s", e)
             return None
+        before = job.sheets                    # the sheets of the earlier parts
         result, error = None, None
         t0 = time.monotonic()
         self.scanner.abort = self._abort_read
@@ -540,19 +554,21 @@ class Service:
                                        cancel=self._cancel_scan)
         except PaperLost as e:
             result, error = e.result, e
-            log.error("scan stopped after %d complete sheets: paper lost in the middle of a sheet", job.sheets)
+            log.error("scan stopped after %d complete sheets: paper lost in the middle of a sheet",
+                      job.sheets - before)
         except NoPaper as e:
             result, error = e.result, e
-            log.warning("no paper in the scanner" if not job.sheets else "scan stopped: no paper")
+            log.warning("no paper in the scanner" if job.sheets == before else "scan stopped: no paper")
         except SenseError as e:
             result, error = e.result, e
-            log.error("scan stopped after %d complete sheets: %s", job.sheets, SenseError.describe(e.sense))
+            log.error("scan stopped after %d complete sheets: %s", job.sheets - before,
+                      SenseError.describe(e.sense))
         except (OSError, IxError) as e:
             result, error = getattr(e, "result", None), e
-            log.error("scan failed after %d complete sheets: %s", job.sheets, short_error(e))
+            log.error("scan failed after %d complete sheets: %s", job.sheets - before, short_error(e))
         except Exception as e:
             error = e
-            log.exception("scan failed after %d complete sheets", job.sheets)
+            log.exception("scan failed after %d complete sheets", job.sheets - before)
         finally:
             try:
                 self.scanner.close()
@@ -564,22 +580,65 @@ class Service:
             elif self.cfg.scanner.get("renew_after_job", False):
                 self._release()
                 self._try_reserve()
+        n = job.sheets - before                # the sheets of this part
         normal = error is None or (isinstance(error, NoPaper) and not isinstance(error, PaperLost))
-        deliver = job.sheets > 0 and (normal or bool(self.cfg.service.get("deliver_partial", True)))
-        if not normal and job.sheets:
-            job.warnings.append("scan stopped after %d sheets: %s" % (job.sheets, short_error(error)))
+        partial = bool(self.cfg.service.get("deliver_partial", True))
+        if part == 1:
+            deliver = n > 0 and (normal or partial)
+        else:                                  # the earlier parts stay; the partial rule applies to this part
+            deliver = job.deliver and (normal or partial or n == 0)
+        prefix = "part %d: " % part if part > 1 else ""
+        if not normal and n:
+            job.warnings.append(prefix + "scan stopped after %d sheets: %s" % (n, short_error(error)))
             if not deliver:
                 log.warning("deliver_partial = false: %d complete sheets not sent (kept in %s)", job.sheets,
                             os.path.join(self.work_dir, FAILED))
         if result is not None:
-            job.warnings.extend(w for w in result.warnings if w not in job.warnings)
-        if deliver:
+            job.warnings.extend(prefix + w for w in result.warnings if prefix + w not in job.warnings)
+        if deliver and n:
             self.scans += 1
-            log.info("scan done: %d sheets in %.1f s%s", job.sheets, time.monotonic() - t0,
+            log.info("scan done: %d sheets in %.1f s%s", n, time.monotonic() - t0,
                      " (probable paper jam)" if result is not None and result.jam_warning else "")
+        job.end_part(n)
         job.end_scan(deliver)
-        self._queue(job)
+        window = float(self.cfg.service.get("continue_window") or 0)
+        if window > 0 and deliver and normal and not self.stop_event.is_set():
+            if n or held is None:              # a new part: the time starts again
+                self.held = Held(job, key, self.clock() + window)
+                log.info("continue scanning: part %d added (%d sheets); delivery in %g s", part, n, window)
+            else:
+                log.info("continue scanning: no sheet added; delivery in %.0f s",
+                         max(0.0, held.deadline - self.clock()))
+        else:
+            self.held = None                   # an error or a stop ends the continuation
+            self._queue(job)
         return result
+
+    # --- Continue scanning (main thread) ---
+    def _continue_part(self, key):
+        """Return the Held document that gets the next part, or None (a new job).
+
+        A press with another button profile (KEY) delivers the document that waits.
+        """
+        held = self.held
+        if held is not None and held.key != key:
+            self._deliver_held("a press with profile %s" % key)
+            held = None
+        return held
+
+    def _continue_tick(self):
+        """Deliver the document that waits when its continue_window has ended."""
+        if self.held is not None and self.clock() >= self.held.deadline:
+            self._deliver_held("the time ended")
+
+    def _deliver_held(self, why):
+        """Give the document that waits to the worker (WHY: for the log)."""
+        held, self.held = self.held, None
+        if held is None:
+            return
+        log.info("continue scanning: %s: the document (%d parts) goes to delivery", why,
+                 len(held.job.dir.m.get("parts") or []) or 1)
+        self._queue(held.job)
 
     def _queue(self, job):
         with self.lock:
@@ -719,6 +778,7 @@ class Service:
             return None
         doc.job_id = jd.id
         doc.paper_path = jd.m.get("paper_path") or "top"
+        doc.parts = doc_parts(jd)
         jd.m["document"] = dict(filename=doc.filename, title=doc.title, profile=doc.profile, pages=doc.pages,
                                 receipt=doc.receipt, created=doc.created, warnings=doc.warnings, size=doc.size,
                                 paper_path=doc.paper_path)
@@ -827,6 +887,7 @@ class Service:
                        m.get("warnings") or [], path=jd.pdf_path())
         doc.job_id = jd.id
         doc.paper_path = m.get("paper_path") or jd.m.get("paper_path") or "top"
+        doc.parts = doc_parts(jd)
         return doc
 
     def retry_unsent(self, force=False):
@@ -947,8 +1008,26 @@ class Service:
         return job
 
 
+class Held:
+    """A document that waits continue_window seconds for more parts (continue scanning)."""
+
+    def __init__(self, job, key, deadline):
+        self.job = job                    # the Job (its directory stays in work_dir/jobs)
+        self.key = key                    # the button profile: a press with this profile adds a part
+        self.deadline = deadline          # Service.clock(): then the document goes to delivery
+
+
+def doc_parts(jd):
+    """The parts of a continue scanning document (for the outputs), or None for one part."""
+    parts = jd.m.get("parts") or []
+    if len(parts) < 2:
+        return None
+    return [dict(part=p.get("part", i + 1), sheets=p.get("sheets", 0), paper_path=p.get("paper_path") or "top")
+            for i, p in enumerate(parts)]
+
+
 class Job:
-    """One button press: the sheets on disk and the prepared pages."""
+    """One button press (or more, with continue scanning): the sheets on disk and the prepared pages."""
 
     def __init__(self, svc, profile, jobdir=None, paper_path="top"):
         """PAPER_PATH: "top" or "front" (a new job only; a JOBDIR keeps its manifest value)."""
@@ -962,6 +1041,7 @@ class Job:
         self.dir = jobdir or JobDir.create(svc.work_dir, profile.name, paper_path)
         self.dir.claim()                  # this service owns the job until process() is done
         self.store = svc.pipeline.store_for(self.dir.path, svc.budget)
+        self.sheet_base = 0               # continue scanning: the scanner numbers the sheets of each part from 0
 
     def add_sheet(self, sides):
         """Called by the scan for each complete sheet. Write it to disk, then queue its pages.
@@ -969,6 +1049,8 @@ class Job:
         If the write fails (for example a full disk), the error stops the scan. The side
         files that are on disk stay; process() finds them (JobDir.reconcile).
         """
+        for s in sides:
+            s.sheet += self.sheet_base    # the number in the document (file name and page order)
         self.dir.add_sheet(sides)         # first on disk (fsync): an error later cannot lose it
         self.sheets += 1
         self.submit(sides)
@@ -988,6 +1070,36 @@ class Job:
                 continue
             fut = self.svc.executor.submit(self.svc.pipeline.prepare, page, self.profile, self.store)
             self.futures.append((s.sheet, name, getattr(s, "path", None), s.dpi, fut))
+
+    def begin_part(self, paper_path):
+        """Start one scan of the document (a part). Return its number (1, 2, ...).
+
+        Part 1 is the job of the first press. A later part (continue scanning) gets its
+        sheet numbers after the files of the earlier parts. Its manifest shows "scanning"
+        until the part ends, so that a restart in the scan applies the partial rule.
+        """
+        parts = self.dir.m.setdefault("parts", [])
+        base = self.dir.next_sheet() if parts else 0
+        parts.append(dict(part=len(parts) + 1, paper_path=paper_path, sheets=0))
+        if len(parts) > 1:
+            state = self.dir.m.get("state")
+            self.dir.m["state"] = "scanning"
+            try:
+                self.dir.save()
+            except BaseException:
+                parts.pop()
+                self.dir.m["state"] = state
+                raise
+        self.sheet_base = base
+        return len(parts)
+
+    def end_part(self, sheets):
+        """Record the number of complete sheets of the last part. A later part with no sheet goes away."""
+        parts = self.dir.m.get("parts") or []
+        if parts:
+            parts[-1]["sheets"] = sheets
+            if not sheets and len(parts) > 1:
+                parts.pop()
 
     def end_scan(self, deliver):
         self.deliver = deliver
