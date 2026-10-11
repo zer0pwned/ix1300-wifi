@@ -336,8 +336,9 @@ class Document:
 def side_order(profile):
     """Return the two sides in reading order.
 
-    paper_face only sets the order. With "down" (the normal load), the print
-    is on the back image, so the back side comes first. Which side a simplex
+    paper_face only sets the order. With "up" (the default: the stack face up,
+    first page on top), the front side comes first. With "down", the back side
+    comes first. Which side a simplex
     profile keeps depends on the print (ink ratio), not on paper_face.
     """
     return ("back", "front") if profile.paper_face == "down" else ("front", "back")

@@ -57,7 +57,8 @@ auto_register = false
 # After a reconnect or a power-on, the service tries again at least each retry_max s.
 retry_min = 2
 retry_max = 10
-# Auto power-off time of the scanner in minutes (not verified on the scanner).
+# Auto power-off time of the scanner in minutes. The scanner keeps the value (tested);
+# the effect of a new time on the power-off is not tested yet.
 # Empty: the service does not change the scanner value. 0: auto power-off off.
 # 15..1890 in steps of 15 (factory value: 240). After each reserve, the service reads
 # the value and writes it only when it is different. An error gives a warning only.

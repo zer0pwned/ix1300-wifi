@@ -119,7 +119,7 @@ PROFILE_DEFAULTS = {
     "dpi": 300,
     "color": "auto",
     "duplex": True,
-    "paper_face": "down",               # order only: down = back side first (normal load)
+    "paper_face": "up",                 # order only: up = stack face up, first page on top (reading order)
     "blank_skip": True,
     "length": "auto",                   # "auto", "long" (top chute, up to 3,000 mm) or millimetres
     "rotate": None,                     # None: use pipeline.rotate
@@ -439,7 +439,7 @@ class Profile:
     dpi: int = 300
     color: str = "auto"
     duplex: bool = True
-    paper_face: str = "down"
+    paper_face: str = "up"
     blank_skip: bool = True
     length: object = "auto"
     rotate: object = None

@@ -1,289 +1,468 @@
-# SANE backend `ix1300`: ScanSnap iX1300 on Wi-Fi
+# SANE backend for the ScanSnap iX1300 on Wi-Fi
 
-This backend lets the standard SANE programs (scanimage, scanadf, scanbd,
-gscan2pdf, sane-scan-pdf) scan from a PFU (Fujitsu) ScanSnap iX1300 on a
-Wi-Fi network. The backend uses TCP and UDP. For USB, use the `fujitsu`
-backend.
+This folder has a SANE backend with the name `ix1300`. With it, the normal
+Linux scan programs can use a ScanSnap iX1300 over Wi-Fi. Examples of these
+programs are `scanimage`, `scanadf`, `gscan2pdf`, `sane-scan-pdf` and
+`scanbd`.
 
-## Files
+For a scanner on a USB cable, you do not need this backend. Use the
+`fujitsu` backend that comes with SANE.
 
-| File | Content |
-|---|---|
-| `ix1300.c`, `ix1300.h` | The backend source |
-| `ix1300.conf.in` | The configuration file template |
-| `sane-ix1300.man` | The manual page, sane-ix1300(5) |
-| `ix1300.desc` | The SANE description file (`doc/descriptions/`) |
-| `sane-backends-ix1300.patch` | The patch for sane-backends 1.3.1 (`git diff`) |
-| `install-on-debian.sh` | The build and install script for Debian |
-| `Makefile` | A standalone build (it needs a configured sane-backends tree) |
-| `tests/` | The test harness: stub SANE headers, a fake scanner, and the tests (see "Tests") |
+---
 
-## Install on Debian
+## Do you need the backend?
+
+The project has two ways to use the scanner. Select the one that agrees
+with how you work.
+
+- **The Docker service** (see the [main README](../README.md)). You push the
+  Scan button, and a PDF goes to Paperless-ngx, a folder, or a webhook. You
+  do not use a computer screen. Most users want this.
+- **This SANE backend.** You start each scan from a scan program on your
+  computer, and you get image files. This is for users who already have a
+  SANE workflow, or who want `gscan2pdf` or a similar program.
+
+> **Use one at a time.** The scanner works with only one program at a time.
+> Do not run the Docker service and a SANE program at the same time. Stop
+> the service (`docker compose stop`) before you use the backend.
+
+---
+
+## Before you start
+
+You need these items:
+
+- A ScanSnap iX1300 that is on your Wi-Fi network.
+- The host ID that the scanner knows. This is a number of 16 hex digits.
+- A Debian or Raspberry Pi OS computer in the same network.
+
+The scanner accepts commands only from a computer with the correct host ID.
+The backend cannot put the scanner on Wi-Fi, and it cannot register a host
+ID. Do these two steps one time with a USB cable. Step 2 of the
+[main README](../README.md) shows how.
+
+---
+
+## Install
+
+Go to this folder and run the install script as root. Put your host ID in
+the command:
 
 ```
+cd sane-backend
 sudo HOSTID=0123456789ABCDEF ./install-on-debian.sh
 ```
 
-The script installs the build packages, gets the sane-backends 1.3.1
-source, applies the patch, and builds only the `ix1300` backend. Then it
-installs these items:
+The script does these steps:
 
-- `/usr/lib/<multiarch>/sane/libsane-ix1300.so.1`
-- `/etc/sane.d/ix1300.conf` (only if the file is not there)
-- the `ix1300` line in `/etc/sane.d/dll.conf`
-- `/usr/share/man/man5/sane-ix1300.5`
+1. It installs the build packages with `apt`.
+2. It downloads the sane-backends 1.3.1 source into `sane-backend/sane-backends`.
+3. It adds the `ix1300` backend to that source.
+4. It builds only the `ix1300` backend.
+5. It installs the library, the configuration file, the `dll.conf` line and
+   the manual page.
 
-## Configuration
+The script writes `/etc/sane.d/ix1300.conf` only if that file does not exist.
+It writes the host ID only into a new file. If the file already exists, add
+the host ID yourself (see "Configure").
 
-Edit `/etc/sane.d/ix1300.conf`:
+The script has two more settings. Set `NO_APT=1` if the build packages are
+already on the computer. Give a folder as the first argument if you already
+have a sane-backends 1.3.1 source tree.
 
-```
-net auto                  # find scanners with a UDP broadcast
-#net 192.0.2.212       # or give the address of the scanner
-hostid 0123456789ABCDEF   # the host ID that the scanner has registered
-```
-
-The scanner keeps one registered host ID. If the ID is not correct, the
-scanner refuses the reserve (result -6), and `scanimage` shows "Access to
-resource has been denied". ScanSnap Home on a different computer can
-register its own ID. Then you must register your ID again over USB.
-
-## Use
+When the script finishes, find the scanner:
 
 ```
 scanimage -L
-scanimage -d ix1300:192.0.2.212 -A
-scanimage -d ix1300:192.0.2.212 --source "ADF Back" --mode Gray \
+```
+
+The output shows the device name of the scanner, for example
+`ix1300:192.168.1.50`. The part after `ix1300:` is the IP address of the
+scanner.
+
+The manual page has the full reference: `man sane-ix1300`.
+
+---
+
+## Configure
+
+The configuration file is `/etc/sane.d/ix1300.conf`. Usually you must
+change only two lines:
+
+```
+net auto
+hostid 0123456789ABCDEF
+```
+
+`net auto` finds the scanner with a broadcast on the local network. If the
+broadcast does not get to the scanner, write its address instead:
+
+```
+net 192.168.1.50
+```
+
+You can write more than one `net` line. If you do not set `hostid`, the
+backend uses the MAC address of the computer and two zero bytes. The
+scanner usually refuses this ID.
+
+The file has more settings. Usually you do not change them:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `iface` | the route to the scanner | The network interface to use, for example `wlan0` |
+| `timeout` | 30 | The longest time in seconds for one reply from the scanner |
+| `reserve-timeout` | 30 | The scanner becomes free this many seconds (plus 10) after the last keepalive |
+| `keepalive` | 15 | The time in seconds between two keepalive packets |
+| `discovery-timeout` | 3000 | The time in milliseconds that `net auto` waits for replies |
+| `trigger-port` | 0 | The UDP port for Scan button packets. 0 lets the system select a port |
+
+---
+
+## Scan
+
+All examples use the address 192.168.1.50. Use the address that
+`scanimage -L` shows.
+
+### Load the paper
+
+> **Load only the sheets that you want to scan.** The scanner always feeds
+> the whole stack in one job. It cannot stop after a number of sheets.
+
+The side of the sheet that faces up in the top chute is the **front**. The
+side that faces down is the **back**. Select the source that agrees with
+the side that has the print:
+
+- Print faces up: use `--source "ADF Front"` (the default).
+- Print faces down: use `--source "ADF Back"`.
+- Print on both sides: use `--source "ADF Duplex"`. You get two images for
+  each sheet, first the front, then the back.
+
+The backend does not turn the images. Some pages can come out upside down.
+
+### scanimage
+
+Scan one page into a PNG file:
+
+```
+scanimage -d ix1300:192.168.1.50 --source "ADF Front" --mode Gray \
           --resolution 300 --format=png -o page.png
-scanimage -d ix1300:192.0.2.212 --source "ADF Duplex" --batch=p%03d.pnm
-scanimage -d ix1300:192.0.2.212 --source "ADF Duplex" --batch=p%03d.pnm \
+```
+
+Scan the full stack, both sides, into one file for each page:
+
+```
+scanimage -d ix1300:192.168.1.50 --source "ADF Duplex" --batch=page%03d.pnm
+```
+
+With `--batch`, the backend reads until the chute is empty. Two sheets in
+duplex give four files.
+
+Scan only the first two sheets, both sides:
+
+```
+scanimage -d ix1300:192.168.1.50 --source "ADF Duplex" --batch=page%03d.pnm \
           --batch-count=4
-scanimage -d ix1300:192.0.2.212 --source "Card Duplex" --batch=card%d.pnm
 ```
 
-Load only the sheets that you want to scan. The scanner feeds the whole
-stack in one job (see "Paper feed").
+The scanner still feeds the sheets after the limit. They come out with no
+scan (see "Stop a scan").
 
-### Which side is the front?
-
-The backend uses the side names of the scanner. Window 0 is "front".
-Usually you load the paper with the printed side down. Then the print is
-on the **back** side. For one-sided documents, use `--source "ADF Back"`.
-With `ADF Duplex`, the backend gives two frames for each sheet: first the
-front, then the back.
-
-### Front slot (Card sources)
-
-The `Card Front`, `Card Back` and `Card Duplex` sources scan from the
-front slot (return path). The sides are the same as for the ADF sources
-(window 0 is the front). The names are the same as in the fujitsu
-backend.
-
-- Put **one sheet** into the front slot. The slot takes one sheet at a
-  time, and the job ends after that sheet. The sheet comes back out at
-  the front.
-- **No long paper.** The front slot does not take paper longer than an
-  A4 sheet: a long receipt jams.
-- With a Card source, `sane_start` reads C2 first. With no sheet in the
-  front slot, it gives SANE_STATUS_NO_DOCS and starts no job.
-- With an ADF source and a sheet only in the front slot, `sane_start`
-  also gives SANE_STATUS_NO_DOCS. The debug output (`SANE_DEBUG_IX1300=1`)
-  then shows "paper is in the front slot; select a Card source".
-- `page-loaded` follows the source: the chute for ADF, the front slot
-  for Card.
-
-### Options
-
-| Option | Values | Note |
-|---|---|---|
-| `--source` | ADF Front, ADF Back, ADF Duplex, Card Front, Card Back, Card Duplex | See above. Card: the front slot, one sheet |
-| `--mode` | Color, Gray, Lineart | Lineart is a software threshold |
-| `--resolution` | 150, 200, 300, 600 | |
-| `--page-width`, `--page-height` | mm | The maximum height gives the automatic length (895.5 mm) |
-| `-l -t -x -y` | mm | The backend cuts the area from the image |
-| `--threshold` | 0..255 | Lineart only |
-| `--ald` | yes (default), no | Removes the empty area after the paper |
-| `--halt-on-cancel` | yes, no (default) | Cancel: stop the paper in the paper path, not feed it out (see below) |
-| `--compression` | None (default), JPEG | JPEG gives SANE_FRAME_JPEG; most frontends cannot use it |
-| `--scan`, `--long-press`, `--page-loaded` | read only | Sensors for scanbd |
-
-With `--ald=yes`, the backend does not know the height before
-`sane_start`. Then the parameters show lines = -1. After `sane_start`, the
-height is correct, so `--format=png` also works.
-
-### Paper feed
-
-The scanner feeds **all** sheets in the chute in one job. It does not wait
-for the host, and there is no clean stop after a number of sheets
-(PROTOCOL.md 8.6). So:
-
-- **Load only the sheets that you want to scan.**
-- To scan the stack, use `--batch` and let the backend read until the
-  chute is empty. This is the normal end: E0 gives "no paper" (sense
-  3/80/03), and the backend sends END JOB (D6) only.
-- The frontend sets the page limit, not the backend. Use
-  `scanimage --batch-count=N`. With duplex, each sheet gives 2 pages.
-  When the frontend stops before the chute is empty (`--batch-count`, or
-  `scanimage` without `--batch`), it calls `sane_cancel`. The cancel has
-  the result below.
-
-Cancel with sheets left in the job (`sane_cancel`, `sane_close`, or
-Ctrl-C during a job):
-
-| `--halt-on-cancel` | Commands | Result on the iX1300 |
-|---|---|---|
-| no (default) | CANCEL READ (D8), E0, wait, END JOB (D6) | **The scanner feeds out the rest of the stack without a scan.** The backend waits until C2 shows an empty chute and a clear paper path (at most 120 s), then sends D6. The paper path is then empty |
-| yes | D8, D6 | The motor stops at once. D6 does not eject paper. A sheet that the scanner already pulled in can stop in the paper path (5-sheet test: near the exit, and the next sheet at the pick), or it can still come out (2-sheet test). The rest of the stack stays in the chute. If paper stays in the path, open the ADF top section and remove it before the next scan |
-
-This agrees with the `fujitsu` backend: a cancel ejects the paper in the
-path, and the option `halt-on-cancel` halts the feed. After D8, a READ
-gives sense 5/24/00, so the backend sends no READ. The backend ignores
-the sense of E0 after D8, but it stops the wait at once for "no paper", a
-paper jam, or an open cover.
-
-After an error (for example a paper jam or a timeout), the backend sends
-D8 and D6 only, because the paper path can have a jam. Remove the paper
-by hand. If the scanner gives BUSY for D8 or D6, the backend sends the
-command again after 0.25 s (at most 20 times): BUSY means that the
-scanner did not do the command. The backend reports a failure of D8 or D6
-in the debug output (level 1).
-
-Uncertain job: if the reply of D5 or D6 is lost, or if the backend makes
-a new reserve while a job was active, the backend does not know if the
-scanner still has the job. The next `sane_start` then does a bounded
-recovery on the new connection before the next D5:
-
-1. D8 and D6 (no E0: it could feed out the paper of the new job). For
-   this job, an error sense for D6 means "no job". If D8 and D6 fail,
-   `sane_start` tries one more time, then gives the error. The job stays
-   uncertain, and the next `sane_start` starts the recovery again.
-2. The C2 check in the job start: if paper is at the feed sensor (ADF
-   source, or paper in the chute), paper of the old job is still in the
-   paper path. The backend does not send D5 (D5 would feed this paper into
-   the new job) and gives `SANE_STATUS_JAMMED`. Open the ADF top section,
-   remove the paper, and start again. The check stays active until C2
-   shows a clear feed sensor. For a Card source with an empty chute, the
-   check cannot see a difference between old paper and a sheet in the
-   front slot.
-
-The backend never sends E0, READ, D5 or D6 again after a lost reply.
-
-### Status values
-
-| Status | Meaning |
-|---|---|
-| `SANE_STATUS_NO_DOCS` | The chute is empty: E0, or the first READ of a new sheet (before image data), gave sense 3/80/03 |
-| `SANE_STATUS_JAMMED` | Paper jam, double feed, or the sheet was lost: sense 3/80/03 on the back side or after image data. Also: paper of an uncertain old job is in the paper path (see above) |
-| `SANE_STATUS_IO_ERROR` | No new image data for 60 s, a side that is not complete in 600 s, a side larger than 64 MiB, a bad reply, or JPEG data that is not complete or not valid |
-| `SANE_STATUS_DEVICE_BUSY` | An option change during a job (call `sane_cancel` first), or a different call uses the device |
-| `SANE_STATUS_CANCELLED` | `sane_cancel` stopped the scan, or `sane_read` after `sane_cancel` |
-
-A frame never gets lines that are not in the JPEG data. If the JPEG data
-of a side is not complete, `sane_read` gives the good lines and then
-`SANE_STATUS_IO_ERROR`.
-
-## How the backend works
-
-1. `sane_get_devices` sends a 32-byte UDP probe to port 52217. It accepts
-   144-byte replies with the product name "ScanSnap iX1300".
-   The backend accepts a reply only from the address in the reply.
-2. `sane_open` sends a reserve to Port2 (TCP 53219), connects to Port1
-   (TCP 53218), and sends INQUIRY. A thread sends a keepalive every 15 s.
-   If the thread does not start, `sane_open` fails.
-   - Result -4: `SANE_STATUS_DEVICE_BUSY` (a different host has the scanner).
-   - Result -6: `SANE_STATUS_ACCESS_DENIED` (the host ID is not registered).
-3. The first `sane_start` of a job sends D8, E9, D4, C2 and D5. If C2 shows
-   no paper, `sane_start` gives `SANE_STATUS_NO_DOCS`.
-4. Each sheet: E0, then READ of the front and the back until the end of
-   each side (sense key 0 with EOM). The backend sends the same READ again
-   after "busy" and after "temporary no data" (sense 3/80/13). Sense key 0
-   without EOM does not end the side. With `--ald`, the pixel size READ
-   gives the real line count, and the backend writes it into the JPEG SOF
-   marker.
-5. The next `sane_start` sends E0 again. When E0 or the first READ of the
-   new sheet gives sense 3/80/03 (no paper), `sane_start` sends D6 and
-   gives `SANE_STATUS_NO_DOCS`. The backend does not use the C2 hopper bit
-   after the first sheet, also not after a timeout. The scanner pulls the
-   next sheets into the paper path early, so the bit shows "empty" while
-   sheets are still in the scanner.
-6. A cancel in a job sends D8, E0 (the scanner feeds out the rest of the
-   stack), waits for a clear paper path, and sends D6. With
-   `--halt-on-cancel`, it sends D8 and D6 only. `sane_cancel` only sets a
-   flag; the next call does this work (see "Cancel" below). `sane_close`
-   does the same, then sends the release.
-7. A full reply must come in the `timeout` time (30 s). The backend sends a
-   command again on a new connection only if this is safe: INQUIRY, C2,
-   D8, E9 and D4. It does not send E0, READ, D5 or D6 again. If the reply
-   of D5 or D6 is lost, the next `sane_start` does the recovery of an
-   uncertain job (D8, D6, C2 check).
-
-Reserve: if the scanner does not answer a keepalive (3 packets in 3 s), or
-if it sends a power or release event, the next `sane_start` sends a
-keepalive again. If there is no reply, the backend searches the scanner
-again and makes a new reserve. This is necessary after the scanner turns
-itself off (after about 4 hours) and you turn it on again. If a job was
-active, the job is then uncertain, and the backend does the recovery
-(D8, D6, C2 check) before the next D5.
-
-Cancel: `sane_cancel` can come from a signal handler or a different thread.
-It only sets a flag (an atomic `sig_atomic_t`). It does no network I/O, no
-memory operation and no debug output, so it is safe in a signal handler.
-
-- If `sane_start` runs, a wait for a scanner reply stops in 0.1 s (also in
-  the middle of one reply). The backend closes Port1, because the reply is
-  not complete. Then `sane_start` ends the job on a new connection and
-  gives `SANE_STATUS_CANCELLED`.
-- If `sane_read` runs, it stops after its current line, ends the job and
-  gives `SANE_STATUS_CANCELLED`.
-- If no call runs, the next `sane_read` (it gives `SANE_STATUS_CANCELLED`),
-  `sane_start` (it then starts a new job), option change or `sane_close`
-  ends the job. Until then, the scanner keeps the job. A frontend that
-  calls `sane_cancel` and then stops without `sane_close` leaves the job
-  open in the scanner until the reserve ends.
-
-A cancel does not stop the end of the job itself (D8, E0, the wait, D6).
-
-The scan button: while the device is open, the backend reads C2 byte 4
-(bit 0 short press, bit 5 long press) and the UDP trigger packets that the
-scanner sends to the trigger port of the reserve. The backend accepts only
-48-byte trigger packets from the address of the scanner, with a known
-code, and ignores a sequence number that it saw in the last 16 events.
-This is a filter on the LAN, not an authentication.
-
-Options: while a job is active, or while a side of a sheet waits for its
-frame, an option change gives `SANE_STATUS_DEVICE_BUSY`. Call
-`sane_cancel` first.
-
-Debug output: `SANE_DEBUG_IX1300=5` (events and sense data), `15` (each
-command), `30` (hex dumps).
-
-## Tests
-
-`tests/` has a test harness. It compiles `ix1300.c` with stub SANE
-headers and a fake scanner (no network, no scanner, AddressSanitizer):
+### scanadf
 
 ```
-make -C tests            # the tests on ix1300.c
-make -C tests test-real  # also decode scanner JPEGs through the backend
-make -C tests orig       # the same tests on an older copy in tests/orig/
+scanadf -d ix1300:192.168.1.50 --source "ADF Duplex" -o page-%04d.pnm
 ```
 
-`test-real` uses the synthetic JPEGs in `../service/tests/data` and the
-real scans in `../scans/raw` if that directory exists. `tests/orig/` is
-not in the repository. Without it, `make orig` does nothing.
+### sane-scan-pdf
+
+`sane-scan-pdf` is a separate script that makes one PDF from a stack. It
+calls the SANE programs, so it can use this backend. Give it the device
+name and the duplex option:
+
+```
+scan -x ix1300:192.168.1.50 -d -o document.pdf
+```
+
+The options of `sane-scan-pdf` can change. Examine `scan --help` for your
+version.
+
+### The front slot
+
+The front slot takes one card, photo, or thick sheet at a time. Use the
+`Card` sources for it:
+
+```
+scanimage -d ix1300:192.168.1.50 --source "Card Duplex" --batch=card%d.pnm
+```
+
+- Put **one** sheet into the slot. The job ends after that sheet, and the
+  sheet comes back out at the front.
+- Do not put long paper into the front slot. Paper longer than an A4 sheet
+  jams. Use the top chute for receipts.
+- `Card Front`, `Card Back` and `Card Duplex` use the same sides as the
+  `ADF` sources.
+- If the front slot is empty, the scan stops with the message "Document
+  feeder out of documents".
+
+If a sheet is in the front slot but you select an `ADF` source, you also
+get "out of documents". Select a `Card` source.
+
+---
+
+## The options
+
+`scanimage -d ix1300:192.168.1.50 -A` shows all options and their values.
+This list explains them.
+
+**`--source`**: `ADF Front` (default), `ADF Back`, `ADF Duplex`,
+`Card Front`, `Card Back` or `Card Duplex`. ADF is the top chute. Card is
+the front slot.
+
+**`--mode`**: `Color` (default), `Gray` or `Lineart`. The scanner selects
+the color itself. The backend changes the image to the mode that you select.
+For `Lineart`, the backend makes black and white from the gray image.
+
+**`--threshold`**: 0 to 255, default 128. This option works only in
+`Lineart` mode. A pixel that is darker than this value becomes black.
+
+**`--resolution`**: 150, 200, 300 (default) or 600 dpi.
+
+**`--page-width`, `--page-height`**: the paper size in mm. The maximum
+width is about 219.5 mm. The maximum height is 895.5 mm. The default is
+the maximum. With the maximum height, the scanner finds the length of the
+paper itself.
+
+**`-l`, `-t`, `-x`, `-y`**: the scan area on the page, in mm. The backend
+cuts this area from the full image.
+
+**`--ald`**: `yes` (default) or `no`. With `yes`, the backend removes the
+empty area after the end of the paper. The backend then knows the page
+height only after the scan starts. Some programs show a height of -1 before
+the scan. This is normal.
+
+**`--compression`**: `None` (default) or `JPEG`. With `JPEG`, the backend
+gives the JPEG data of the scanner without a change. Most scan programs
+cannot use this data. Keep `None`. This option is not available in
+`Lineart` mode.
+
+**`--halt-on-cancel`**: `no` (default) or `yes`. This option sets what
+happens to the paper when you stop a scan. See "Stop a scan".
+
+**`--scan`, `--long-press`, `--page-loaded`**: sensors that you can only
+read. `scan` becomes yes one time after a short press of the Scan button.
+`long-press` becomes yes one time after a long press (about 3 seconds).
+`page-loaded` shows if paper is ready: in the top chute for an `ADF`
+source, or in the front slot for a `Card` source. A button daemon such as
+`scanbd` can read these sensors and start a scan.
+
+The backend refuses an option change while a scan job is open. Stop the
+job first.
+
+---
+
+## Stop a scan
+
+The scanner does not wait for the computer. When a job starts, it feeds the
+whole stack. A stop before the end of the stack has one of these two
+results:
+
+- **`--halt-on-cancel=no` (default).** The scanner feeds out all the
+  remaining sheets with no scan. The backend waits until the paper path is
+  empty (at most 120 seconds). After that, the scanner is ready for the next
+  job.
+- **`--halt-on-cancel=yes`.** The motor stops at once. A sheet can stay
+  in the paper path. The other sheets stay in the chute. Open the top
+  section of the scanner and remove the paper before the next scan.
+
+A stop occurs when you use `--batch-count`, when you use `scanimage`
+without `--batch` and the stack has more than one sheet, or when you push
+Ctrl-C.
+
+After an error, for example a paper jam, the backend stops the job and
+does not eject the paper. Open the scanner and remove the paper by hand.
+
+---
 
 ## Limits
 
-- The backend has no TLS. It cannot use a scanner in "RED" or "SEC" mode.
-- The backend does not register a host ID.
-- The front slot (Card sources) takes one sheet at a time and no paper
-  longer than an A4 sheet.
-- The maximum page height is 895.5 mm. Long paper mode is not available.
-- The scanner selects the color automatically. The backend converts the
-  image to the mode that you selected.
-- A paper jam on Wi-Fi does not always give an error. The page then ends at
-  the jam point. The backend has no exit sensor check at the end of the
-  job.
-- There is no clean stop after N sheets. A cancel feeds out the rest of
-  the stack without a scan, or (`--halt-on-cancel`) leaves the paper in
-  the paper path. Load only the sheets that you want to scan.
+- **No long page mode.** The maximum page length is 895.5 mm. The Docker
+  service has a long page mode for receipts up to about 3 m. The backend
+  does not have it.
+- **No clean stop after a number of sheets.** See "Stop a scan".
+- **Front slot:** one sheet at a time, and no paper longer than an A4
+  sheet.
+- **No encryption.** The backend has no TLS. It cannot use a scanner in a
+  mode that needs TLS. Use it only in a network that you trust.
+- **Paper jams.** On Wi-Fi, the scanner does not always report a paper
+  jam. The page then ends at the point of the jam.
+- **No host ID registration.** Register the host ID over USB (see the
+  [main README](../README.md)).
+
+---
+
+## Test status
+
+We did these tests on a real iX1300 over Wi-Fi with this backend:
+
+- Duplex scans of a stack from the top chute: 2 sheets gave 4 pages, and
+  3 sheets gave 6 pages.
+- A stop with sheets left in the chute. The scanner fed out the rest of the
+  stack.
+- A stop with `--halt-on-cancel=yes`.
+- The recovery after the scanner turned itself off and on again.
+
+We did not do these tests with the backend yet:
+
+- The front slot sources (`Card Front`, `Card Back`, `Card Duplex`).
+- A stop with Ctrl-C while a page comes in.
+
+[`../TODO.md`](../TODO.md) has the list of all open items.
+
+---
+
+## If you have a problem
+
+To see more data, set the debug level before the scan command:
+
+```
+SANE_DEBUG_IX1300=5 scanimage -L
+```
+
+Level 1 shows errors, 5 shows important events, 15 shows each command,
+and 30 shows all data bytes.
+
+**`scanimage -L` finds no scanner.**
+Make sure that the scanner is on: open the cover. Make sure that the
+computer and the scanner are in the same network. If the broadcast does not
+work, write `net <address>` in the configuration file.
+
+**"Access to resource has been denied".**
+The scanner does not know your host ID. Make sure that `hostid` in
+`/etc/sane.d/ix1300.conf` is the ID that you registered. ScanSnap Home on a
+different computer can register its own ID. Then register your ID again
+over USB.
+
+**"Device busy".**
+A different program or computer uses the scanner. Stop the Docker service
+and close ScanSnap Home. The scanner also gives this message when its USB
+cable is connected. Disconnect the cable.
+
+**"Document feeder out of documents" at the start.**
+The chute is empty, or the paper is in the wrong place. For the front
+slot, use a `Card` source.
+
+**"Document feeder jammed".**
+Paper is in the paper path. Open the top section of the scanner and remove
+the paper. Then start again. The backend also gives this message when paper
+from a previous job that did not end correctly stays in the scanner.
+
+**"Error during device I/O".**
+The scanner did not send data in time, or the data was not correct. Look
+at the debug output with level 5.
+
+**The scanner turned itself off.**
+Open and close the cover to turn it on again. The backend finds the
+scanner again at the next scan.
+
+---
+
+## For developers
+
+### Files
+
+- `ix1300.c`, `ix1300.h`: the backend source.
+- `ix1300.conf.in`: the template of the configuration file.
+- `sane-ix1300.man`: the manual page, sane-ix1300(5).
+- `ix1300.desc`: the SANE description file.
+- `sane-backends-ix1300.patch`: a `git diff` that adds the backend to
+  sane-backends 1.3.1.
+- `install-on-debian.sh`: the build and install script.
+- `Makefile`: a standalone build.
+- `tests/`: the test harness.
+
+### Build
+
+The usual way to build is `install-on-debian.sh`. It applies the patch to
+the sane-backends 1.3.1 source and then copies the current `ix1300.c`,
+`ix1300.h`, configuration template, manual page and description file over
+the patched files. Thus the build always uses the files in this folder.
+
+To use the patch with your own sane-backends tree, apply it at the tag
+1.3.1:
+
+```
+cd sane-backends
+git checkout 1.3.1
+git apply /path/to/sane-backend/sane-backends-ix1300.patch
+./autogen.sh
+./configure BACKENDS="ix1300"
+make
+```
+
+The backend needs libjpeg.
+
+The `Makefile` in this folder builds the library from a sane-backends tree
+that `configure` has already prepared:
+
+```
+make SANE_SRC=/path/to/sane-backends
+sudo make install SANE_SRC=/path/to/sane-backends
+```
+
+### Tests
+
+The test harness compiles `ix1300.c` with small copies of the SANE headers
+and a simulated scanner. It needs a C compiler and the libjpeg headers. It
+does not need sane-backends, a network, or a scanner. It uses
+AddressSanitizer.
+
+```
+make -C sane-backend/tests            # run the tests
+make -C sane-backend/tests test-real  # also decode scanner JPEG files
+```
+
+`test-real` uses the JPEG files in `service/tests/data`, and the real scans
+in `scans/raw` if that folder exists. Set `JPEG_PREFIX` if the libjpeg
+headers are not in `/opt/homebrew` or `/usr`.
+
+The target `orig` runs the same tests on an older copy of the backend in
+`tests/orig/`. That folder is not in the repository. Without it, the target
+does nothing.
+
+### How the backend talks to the scanner
+
+This section gives a short overview. [`../PROTOCOL.md`](../PROTOCOL.md) has
+all the details.
+
+- **Discovery.** The backend sends a UDP probe to port 52217. It accepts a
+  reply only from the address that the reply contains.
+- **Reserve.** `sane_open` reserves the scanner on TCP port 53219 and sends
+  commands on TCP port 53218. A thread sends a keepalive every 15 seconds.
+  The reserve result -4 gives "Device busy". The results -6 and -7 (wrong
+  host ID) give "Access to resource has been denied". The result -9 (USB
+  mode) gives "Device busy".
+- **Scan job.** The first `sane_start` sends D8, E9, D4, C2 and D5. For each
+  sheet, the backend sends E0 and then reads each side until the end of
+  the side. The job ends when E0 gives "no paper" (sense 3/80/03). Then the
+  backend sends D6.
+- **Stop.** The default stop sends D8, then E0, waits for an empty paper
+  path, and sends D6. With `--halt-on-cancel`, it sends only D8 and D6.
+  `sane_cancel` only sets a flag, so a signal handler can call it. The
+  next backend call does the network work.
+- **Lost replies.** The backend sends a command again only if this is safe
+  (INQUIRY, C2, D8, E9, D4). It never sends E0, READ, D5 or D6 again. If a
+  reply to D5 or D6 is lost, the next `sane_start` sends D8 and D6 and then
+  reads C2. If paper of the old job is still in the paper path, it gives
+  "Document feeder jammed" and does not start a new job.
+- **Scan button.** While the device is open, the backend reads the button
+  from C2 and from the trigger packets of the scanner. It accepts trigger
+  packets only from the address of the scanner. This is a filter, not a
+  security function.
+- **Status values.** `SANE_STATUS_IO_ERROR` also comes when no new image data
+  arrives for 60 seconds, when a side is not complete after 600 seconds,
+  or when a side is larger than 64 MiB.
+
+### License
+
+The backend is under the GPL version 2 or later, with the SANE exception.
+See [`LICENSE`](LICENSE) and [`COPYING`](COPYING).

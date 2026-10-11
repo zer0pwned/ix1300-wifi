@@ -15,6 +15,7 @@ def side(sheet, name, kind="text", w=640, h=880, comps=1, dpi=100):
 
 
 def profile(**kw):
+    kw.setdefault("paper_face", "down")      # these tests check the face-down order
     return C._profile("p", kw)
 
 

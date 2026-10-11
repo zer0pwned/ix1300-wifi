@@ -139,7 +139,7 @@ def readme_block(heading):
 class EndpointsTest(unittest.TestCase):
     def test_readme_separate_endpoints_example(self):
         # Several outputs of the same type with different names, and one profile for each press.
-        cfg = C.load(text=readme_block("Separate endpoints for each profile"), env={})
+        cfg = C.load(text=readme_block("Separate outputs for each profile"), env={})
         self.assertEqual({n: o["type"] for n, o in cfg.outputs.items()},
                          {"paperless_docs": "paperless", "paperless_receipts": "paperless",
                           "expense_webhook": "webhook"})
@@ -155,7 +155,7 @@ class EndpointsTest(unittest.TestCase):
         self.assertIsNot(built["paperless_docs"], built["paperless_receipts"])
 
     def test_same_type_outputs_env_override(self):
-        text = readme_block("Separate endpoints for each profile")
+        text = readme_block("Separate outputs for each profile")
         cfg = C.load(text=text, env={"IX1300_OUTPUTS__PAPERLESS_RECEIPTS__TOKEN": "r"})
         self.assertEqual(cfg.outputs["paperless_receipts"]["token"], "r")
         self.assertNotEqual(cfg.outputs["paperless_docs"]["token"], "r")

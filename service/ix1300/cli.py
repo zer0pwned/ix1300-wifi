@@ -291,6 +291,14 @@ def cmd_retry(args):
 
 def cmd_usb_register(args):
     from . import usb
+    if args.show:                        # read only: no host ID and no configuration needed
+        try:
+            with usb.UsbScanner() as dev:
+                print("registered host ID: %s" % dev.host_id().hex().upper())
+        except usb.UsbError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 1
+        return 0
     hid = args.host_id
     if not hid:
         hid = _load(args).scanner["host_id"]
@@ -298,10 +306,6 @@ def cmd_usb_register(args):
         print("error: give --host-id or set scanner.host_id", file=sys.stderr)
         return 2
     try:
-        if args.show:
-            with usb.UsbScanner() as dev:
-                print("registered host ID: %s" % dev.host_id().hex().upper())
-            return 0
         usb.register_host_id(bytes.fromhex(hid))
     except usb.UsbError as e:
         print("error: %s" % e, file=sys.stderr)
