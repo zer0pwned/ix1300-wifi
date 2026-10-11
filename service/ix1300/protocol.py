@@ -446,6 +446,7 @@ class ScanSettings:
     dpi: int = 300
     color: str = "auto"              # auto, color, gray
     length: int = AUTO_LENGTH         # 1/1200 inch
+    double_feed: bool = True          # D4 byte 4: 0x88 = detection on, 0x00 = off [NV]
 
     def __post_init__(self):
         if self.dpi not in DPI_VALUES:
@@ -463,6 +464,8 @@ class ScanSettings:
         params += bytes(17) + b"\x30"
         if self.color != "auto":
             params[6] = 0x80             # fixed colour mode (not verified on hardware)
+        if not self.double_feed:
+            params[4] = 0x00             # no double-feed detection (not verified on hardware)
         desc = bytearray(48)
         desc[1] = 0x10                   # JPEG
         struct.pack_into(">HH", desc, 2, self.dpi, self.dpi)

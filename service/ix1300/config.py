@@ -26,6 +26,7 @@ from typing import Dict, List
 
 from . import outputs as outputs_mod
 from .protocol import AUTO_LENGTH, DPI_VALUES, ScanSettings, mm_to_length
+from .settings import parse_power_off
 
 try:
     import tomllib as _tomllib            # Python 3.11+
@@ -61,6 +62,7 @@ DEFAULTS = {
         "retry_min": 2.0,
         "retry_max": 10.0,                # longest wait between reserve attempts (seconds)
         "yield_on_request": True,
+        "power_off_minutes": None,        # None or "": do not change; 0: off; 15..1890 in steps of 15
     },
     "service": {
         "short_press_profile": "default",
@@ -116,6 +118,7 @@ PROFILE_DEFAULTS = {
     "crop": "auto",                     # auto (receipts), true, false: cut the page to the paper
     "ocr": None,
     "receipt": "auto",                  # auto, yes, no
+    "double_feed": True,                # double-feed detection (top chute)
     "title": "",
     "outputs": [],                      # empty: all outputs
 }
@@ -349,7 +352,7 @@ def _merge(base, extra):
 
 # Types of the keys that are not in DEFAULTS (profiles and outputs). Other keys are text.
 PROFILE_TYPES = {"dpi": int, "duplex": bool, "blank_skip": bool, "deskew": bool, "ocr": bool,
-                 "outputs": list, "crop": "text", "rotate": "text", "length": "text"}
+                 "double_feed": bool, "outputs": list, "crop": "text", "rotate": "text", "length": "text"}
 OUTPUT_TYPES = {"retries": int, "retry_delay": float, "timeout": float, "max_time": float, "verify_tls": bool,
                 "tags": list, "receipt_tags": list, "correspondent": int, "receipt_correspondent": int,
                 "document_type": int, "receipt_document_type": int, "headers": dict, "fields": dict}
@@ -437,6 +440,7 @@ class Profile:
     receipt: str = "auto"
     title: str = ""
     outputs: List[str] = field(default_factory=list)
+    double_feed: bool = True
 
     @property
     def length_units(self):
@@ -445,7 +449,8 @@ class Profile:
         return min(AUTO_LENGTH, mm_to_length(float(self.length)))
 
     def scan_settings(self):
-        return ScanSettings(dpi=self.dpi, color=self.color, length=self.length_units)
+        return ScanSettings(dpi=self.dpi, color=self.color, length=self.length_units,
+                            double_feed=self.double_feed)
 
 
 def _check_profile_types(name, raw):
@@ -477,7 +482,8 @@ def _profile(name, raw):
                        crop="auto" if str(p["crop"]).lower() == "auto" else _bool(p["crop"], "crop"),
                        ocr=None if p["ocr"] is None else _bool(p["ocr"], "ocr"),
                        receipt=str(p["receipt"]).lower(),
-                       title=str(p["title"]), outputs=list(p["outputs"] or []))
+                       title=str(p["title"]), outputs=list(p["outputs"] or []),
+                       double_feed=_bool(p["double_feed"], "double_feed"))
     except (TypeError, ValueError) as e:
         raise ConfigError("profile %s: %s" % (name, e))
     if prof.dpi not in DPI_VALUES:
@@ -602,6 +608,10 @@ class Config:
                 parse_mac(sc["host_mac"])
             except ValueError:
                 raise ConfigError("scanner.host_mac: 6 bytes expected, for example 02:00:00:a1:b2:c3")
+        try:
+            sc["power_off_minutes"] = parse_power_off(sc.get("power_off_minutes"))
+        except ValueError as e:
+            raise ConfigError(str(e))
         if sc["retry_max"] < sc["retry_min"]:
             raise ConfigError("scanner.retry_max must be retry_min or more")
         if sc["keepalive_interval"] >= sc["reserve_timeout"]:

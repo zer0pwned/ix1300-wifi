@@ -100,6 +100,11 @@ class Emulator:
         self.d5_close = False          # D5 starts the job, but the reply is lost (connection closed)
         self.job = None
         self.params = None
+        self.power_off_time = bytearray([0x10, 0x1E])   # E6 data bytes 0-1: 240 minutes, on [NV]
+        self.e6_log = []               # ("get" or "set", data-out) of each E6 command
+        self.e6_ignore_set = False     # E6 set answers GOOD but keeps the old value
+        self.e6_check = False          # E6 answers CHECK CONDITION 5/20/00
+        self.d4_byte4 = []             # D4 data byte 4 of each D4 (0x88 = double-feed detection on)
         self.sense = sense_bytes(0)
         self.cur = None                # current sheet state
 
@@ -389,7 +394,10 @@ class Emulator:
             if len(out) != 0x50 or out[31] != 0x30:
                 return self._check(5, 0x26, 0)
             self.params = self._params(out)
+            self.d4_byte4.append(out[4])
             return self._reply(0, 0)
+        if op == 0xE6:
+            return self._e6(cdb, out, inlen)
         if op == 0xD5:
             self.job = dict(page=0)
             self.cancelled = False
@@ -420,6 +428,20 @@ class Emulator:
             return self._read(cdb, inlen)
         return self._reply(0, 0)
 
+    def _e6(self, cdb, out, inlen):
+        """Auto power-off time: mode 1 = get (4 bytes in), mode 0 = set (4 bytes out)."""
+        mode = cdb[2] if len(cdb) > 2 else 0xFF
+        self.e6_log.append(("get" if mode == 1 else "set", bytes(out)))
+        if self.e6_check:
+            return self._check(5, 0x20, 0)
+        if mode == 1:
+            return self._reply(0, 0, (bytes(self.power_off_time) + bytes(2))[:inlen])
+        if mode != 0 or len(out) != 4:
+            return self._check(5, 0x24, 0)
+        if not self.e6_ignore_set:
+            self.power_off_time[:] = out[:2]
+        return self._reply(0, 0)
+
     def _flush(self):
         """E0 after D8: feed out the sheet in the path and all sheets in the chute, no scan."""
         n = len(self.hopper)
@@ -444,7 +466,8 @@ class Emulator:
         """The scan parameters in the data of a D4 command."""
         d = d4[32:]
         return dict(dpi=struct.unpack_from(">H", d, 2)[0], gray=d[6] == 0x02,
-                    length=struct.unpack_from(">I", d, 14)[0], auto=d4[6] == 0xC1)
+                    length=struct.unpack_from(">I", d, 14)[0], auto=d4[6] == 0xC1,
+                    double_feed=d4[4] != 0x00)
 
     def prerender(self, settings, *sheets):
         """Make the JPEGs of SHEETS (default: the sheets in the hopper) for the ScanSettings SETTINGS now.
@@ -506,6 +529,8 @@ class Emulator:
             self.stats["temp_no_data"] += 1
             return self._check(3, 0x80, 0x13, data=bytes([page, seq]) + b"\xde\xad")   # data must be dropped
         df = sheet.double_feed
+        if df and not self.params.get("double_feed", True):
+            df = False                       # D4 byte 4 = 00: no double-feed detection
         if df and ((win == 0x00 and df in (True, "front")) or (win == 0x80 and df == "back")):
             self.hopper.clear()
             return self._check(3, 0x80, 0x07)
