@@ -32,9 +32,10 @@ Each item needs the scanner and some paper.
 
 ## Software
 
-1. **Final review with Codex.** Examine the service for portability,
-   robustness, modularity, and ease of change. Examine each finding on the
-   code before you change something.
+1. **Page and sequence checks of READ replies.** The service and the SANE
+   backend log a wrong page number in a READ reply, but they keep the data.
+   First, record real traces to learn which values the scanner sends. Then
+   refuse the wrong replies. (Codex review 3, possible finding 2.)
 2. **Emulator default for E6.** A new scanner gives `00 00` (no value set).
    The emulator gives `10 1E`.
 
