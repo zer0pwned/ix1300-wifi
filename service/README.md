@@ -611,7 +611,7 @@ output types:
 | `retries` | 2 | New attempts after a failure |
 | `retry_delay` | 5 | Seconds before the first new attempt (then 2 x, 4 x, ...) |
 | `timeout` | 60 (webhook), 120 (Paperless) | Seconds for each network operation |
-| `max_time` | 600 | Seconds for one full attempt |
+| `max_time` | 600 | Seconds for one full attempt: connection, upload and reply. A name look-up (DNS) can take longer |
 | `verify_tls` | `true` | Examine the HTTPS certificate |
 
 Each wait is between 50 % and 100 % of the calculated value, so that many

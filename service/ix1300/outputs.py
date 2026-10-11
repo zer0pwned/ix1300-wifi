@@ -114,10 +114,24 @@ def _abort(conn):
             pass
 
 
+class _Late(Exception):
+    """The attempt deadline (max_time) is past."""
+
+
+def _until(body, deadline):
+    """The chunks of BODY. Stop before a chunk after DEADLINE."""
+    for chunk in body:
+        if time.monotonic() >= deadline:
+            raise _Late()
+        yield chunk
+
+
 def http_post(url, body, headers, timeout=60.0, verify_tls=True, max_time=None, factory=None):
     """POST BODY (bytes or Body) to URL. Return (status, the first MAX_RESPONSE bytes of the reply).
 
-    TIMEOUT applies to each socket operation. MAX_TIME stops the full attempt.
+    TIMEOUT applies to each socket operation. MAX_TIME stops the full attempt: the
+    connection (DNS, TCP and TLS) gets only the time that is left, and no data goes
+    out after the deadline. A timer stops the transfer and the reply at the deadline.
     """
     u = urlsplit(url)
     if u.scheme not in ("http", "https") or not u.hostname:
@@ -129,32 +143,49 @@ def http_post(url, body, headers, timeout=60.0, verify_tls=True, max_time=None, 
         if not verify_tls:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+    deadline = time.monotonic() + max_time if max_time else None
+    first = timeout if deadline is None else max(0.001, min(timeout, max_time))
     factory = factory or CONNECTION_FACTORY
     if factory is not None:
-        conn = factory(u.scheme, u.hostname, port, timeout, ctx)
+        conn = factory(u.scheme, u.hostname, port, first, ctx)
     elif u.scheme == "https":
-        conn = http.client.HTTPSConnection(u.hostname, port, timeout=timeout, context=ctx)
+        conn = http.client.HTTPSConnection(u.hostname, port, timeout=first, context=ctx)
     else:
-        conn = http.client.HTTPConnection(u.hostname, port, timeout=timeout)
+        conn = http.client.HTTPConnection(u.hostname, port, timeout=first)
     path = (u.path or "/") + ("?" + u.query if u.query else "")
     length = body.length if isinstance(body, Body) else len(body)
     hdrs = {"Content-Length": str(length), "User-Agent": "ix1300-service"}
     hdrs.update(headers)
+    late = OutputError("no complete reply in %g s" % max_time) if max_time else None
     timer = None
-    if max_time:
-        timer = threading.Timer(max_time, _abort, [conn])
-        timer.daemon = True
-        timer.start()
-    t0 = time.monotonic()
     try:
-        conn.request("POST", path, body=iter(body) if isinstance(body, Body) else body, headers=hdrs)
+        # The connection has the time that is left (a socket timeout). Python cannot stop
+        # a DNS look-up; then the check after connect() stops the attempt.
+        conn.connect()
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise late
+            if conn.sock is not None:
+                conn.sock.settimeout(timeout)
+            timer = threading.Timer(left, _abort, [conn])
+            timer.daemon = True
+            timer.start()
+        data = iter(body) if isinstance(body, Body) else body
+        if deadline is not None:
+            data = _until(data if isinstance(body, Body) else [body], deadline)
+        conn.request("POST", path, body=data, headers=hdrs)
         resp = conn.getresponse()
         return resp.status, resp.read(MAX_RESPONSE)
+    except _Late:
+        raise late
     except OSError as e:
-        if max_time and time.monotonic() - t0 >= max_time:
-            raise OutputError("no complete reply in %d s" % max_time)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise late
         raise OutputError(e.__class__.__name__ + (": " + os.strerror(e.errno) if e.errno else ""))
     except http.client.HTTPException as e:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise late
         raise OutputError("HTTP error: %s" % e.__class__.__name__)
     finally:
         if timer is not None:
