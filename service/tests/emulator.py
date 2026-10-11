@@ -3,7 +3,23 @@
 It implements: discovery and keepalive (UDP), reserve and release (Port2),
 Port1 frames for 12, C2, D8, E9, D4, D5, E0, D6, 03 and 28 (image and pixel
 size), "temporary no data", busy, EOM, padded JPEG height, a multi-sheet
-hopper, jams and button trigger packets.
+hopper, a front slot sheet, jams and button trigger packets.
+
+Front slot (return path) [HW]: one sheet. Before the job C2 shows byte 2 =
+0x80 and byte 3 = 0x81 (hopper empty, exit sensor). E0 takes the front slot
+sheet when the hopper is empty; the next E0 gives "no paper". The emulator
+does not check the E9/D4 path values: it records them (e9_log, d4_log).
+
+Long page mode [NV] (PROTOCOL.md "Long page mode"): D4 params byte 13 = 0x80
+sets the mutual transfer. Then the side length can go up to the E9 length
+(0x23680 = about 3,070 mm), and each image READ must ask for 0x20000 bytes
+(else CHECK 5/24/00: a test guard, not a measured value). A side ends with
+CHECK CONDITION, key 0, EOM and ILI; the sense information (bytes 3-6) is
+(0x20000 - 2) - (image bytes of the last reply), the value that ScanSnap
+Home uses. Options: eom_pad (the last reply has 0x1FFFE image bytes, padded
+with zeros), eom_info_error (add this to the information), long_sof
+("e9": SOF height = E9 length; "window": SOF height = window length, less
+than the real page).
 
 D8 in a job (measured, PROTOCOL.md 8.6): the motor stops at once, and a
 READ gives sense 5/24/00. E0 after D8 feeds ALL remaining sheets out
@@ -19,7 +35,7 @@ from typing import Optional
 
 import support  # noqa: F401  (path setup)
 import jpegsynth
-from ix1300.protocol import KEY, WINDOW_WIDTH
+from ix1300.protocol import KEY, MUTUAL_READ_SIZE, PREREAD_LENGTH, WINDOW_WIDTH
 
 REGISTERED_ID = bytes.fromhex("0123456789ABCDEF")
 EXEMPT = (0x12, 0xC2, 0xE7, 0xD9, 0xED, 0xE2, 0xE3, 0xE4, 0xE5)
@@ -46,10 +62,11 @@ def _recv_exact(sk, n):
     return bytes(buf)
 
 
-def sense_bytes(key, asc=0, ascq=0, eom=False, ili=False):
+def sense_bytes(key, asc=0, ascq=0, eom=False, ili=False, info=0):
     s = bytearray(18)
     s[0] = 0xF0
     s[2] = key | (0x40 if eom else 0) | (0x20 if ili else 0)
+    s[3:7] = (info & 0xFFFFFFFF).to_bytes(4, "big")
     s[7] = 10
     s[12] = asc
     s[13] = ascq
@@ -76,6 +93,14 @@ class Emulator:
         self.stop_event = threading.Event()
         self.threads = []
         self.hopper = []
+        self.front = []                # front slot: 0 or 1 sheet
+        self.e9_log = []               # data of each E9 command
+        self.preread = PREREAD_LENGTH  # E9 +8 length of the last E9 command
+        self.eom_pad = False           # long page mode: pad the last reply to 0x1FFFE image bytes
+        self.eom_info_error = 0        # long page mode: add this to the sense information at EOM
+        self.long_sof = "e9"           # long page mode: SOF height "e9" or "window"
+        self._last_sides = []          # the side data of the last prepared sheet
+        self.d4_log = []               # data of each D4 command
         self.owner = None              # dict: mac, host_id, peer, trigger_port, timeout
         self.occupied_by_other = False
         self.devstatus = 0             # search reply +38 (2 = busy with USB or a stale job)
@@ -136,6 +161,14 @@ class Emulator:
     def load(self, *sheets):
         with self.lock:
             self.hopper.extend(sheets)
+            self.exit_sensor = False
+
+    def load_front(self, sheet):
+        """Put one sheet into the front slot (the slot takes one sheet at a time)."""
+        with self.lock:
+            if self.front:
+                raise ValueError("the front slot takes one sheet at a time")
+            self.front.append(sheet)
             self.exit_sensor = False
 
     def press(self, long=False, copies=3, code=1, interval=None, background=False):
@@ -344,8 +377,8 @@ class Emulator:
     def _reply(self, st, scsi, data=b""):
         return struct.pack(">I", 40 + len(data)) + KEY + struct.pack(">ii", st, scsi) + bytes(24) + data
 
-    def _check(self, key, asc=0, ascq=0, eom=False, ili=False, data=b""):
-        self.sense = sense_bytes(key, asc, ascq, eom, ili)
+    def _check(self, key, asc=0, ascq=0, eom=False, ili=False, data=b"", info=0):
+        self.sense = sense_bytes(key, asc, ascq, eom, ili, info)
         return self._reply(0, 2, data)
 
     def _dispatch(self, op, cdb, out, inlen):
@@ -370,6 +403,9 @@ class Emulator:
                 st[2] |= 0x80
             else:
                 st[3] |= 0x80
+            if self.front and not len(self.hopper) > in_path:
+                st[2] |= 0x80                # front slot sheet: feed and exit sensors [HW]
+                st[3] |= 0x01
             if self.exit_sensor or in_path:
                 st[3] |= 0x01
             self.c2_log.append((bool(st[3] & 0x80), len(self.hopper)))
@@ -384,11 +420,16 @@ class Emulator:
                 self.cancelled = True
             return self._reply(0, 0)
         if op == 0xE9:
+            self.e9_log.append(bytes(out))
+            if len(out) >= 12:
+                self.preread = struct.unpack_from(">I", out, 8)[0]
             return self._reply(0, 0)
         if op == 0xD4:
             if len(out) != 0x50 or out[31] != 0x30:
                 return self._check(5, 0x26, 0)
             self.params = self._params(out)
+            self.params["preread"] = self.preread
+            self.d4_log.append(bytes(out))
             return self._reply(0, 0)
         if op == 0xD5:
             self.job = dict(page=0)
@@ -411,9 +452,9 @@ class Emulator:
                 return self._check(5, 0x2C, 0)
             if self.cancelled:
                 return self._flush()
-            if not self.hopper:
+            if not self.hopper and not self.front:
                 return self._check(3, 0x80, 0x03)
-            sheet = self.hopper.pop(0)
+            sheet = self.hopper.pop(0) if self.hopper else self.front.pop(0)
             self.cur = self._prepare(sheet)
             return self._reply(0, 0)
         if op == 0x28:
@@ -422,7 +463,8 @@ class Emulator:
 
     def _flush(self):
         """E0 after D8: feed out the sheet in the path and all sheets in the chute, no scan."""
-        n = len(self.hopper)
+        n = len(self.hopper) + len(self.front)
+        self.front.clear()
         if self.cur is not None and not all(sd["done"] for sd in self.cur["sides"].values()):
             n += 1
         self.hopper.clear()
@@ -444,7 +486,7 @@ class Emulator:
         """The scan parameters in the data of a D4 command."""
         d = d4[32:]
         return dict(dpi=struct.unpack_from(">H", d, 2)[0], gray=d[6] == 0x02,
-                    length=struct.unpack_from(">I", d, 14)[0], auto=d4[6] == 0xC1)
+                    length=struct.unpack_from(">I", d, 14)[0], auto=d4[6] == 0xC1, mutual=d4[13] == 0x80)
 
     def prerender(self, settings, *sheets):
         """Make the JPEGs of SHEETS (default: the sheets in the hopper) for the ScanSettings SETTINGS now.
@@ -453,6 +495,7 @@ class Emulator:
         need more time than the command timeout of the client.
         """
         params = self._params(settings.d4_data())
+        params["preread"] = struct.unpack_from(">I", settings.e9_data(), 8)[0]
         for sheet in sheets or list(self.hopper):
             self._prepare(sheet, params)
 
@@ -460,8 +503,8 @@ class Emulator:
         key = (kind, width, height, lines, gray, dpi)
         if key not in self._cache:
             comps = 1 if gray or kind == "blank" else 3
-            self._cache[key] = jpegsynth.synth(width, height, comps, content_rows=lines,
-                                               density=0.0 if kind == "blank" else 0.5, dpi=dpi)
+            density = {"blank": 0.0, "receipt": 0.05}.get(kind, 0.5)
+            self._cache[key] = jpegsynth.synth(width, height, comps, content_rows=lines, density=density, dpi=dpi)
         return self._cache[key]
 
     def _prepare(self, sheet, params=None):
@@ -469,13 +512,23 @@ class Emulator:
         dpi = p["dpi"]
         width = WINDOW_WIDTH * dpi // 1200
         padded = p["length"] * dpi // 1200
+        if p.get("mutual"):                  # long page mode: up to the E9 length
+            padded = p.get("preread", PREREAD_LENGTH) * dpi // 1200
         lines = min(padded, int(round(sheet.length_mm / 25.4 * dpi)))
         if sheet.jam_mm is not None:
             lines = min(lines, int(round(sheet.jam_mm / 25.4 * dpi)))
         sides = {}
         for win, kind in ((0x00, sheet.front), (0x80, sheet.back)):
-            data = self._jpeg(kind, width, padded, lines, p["gray"], dpi)
+            if p.get("mutual") and self.long_sof == "window":
+                data = self._jpeg(kind, width, lines, lines, p["gray"], dpi)
+                window = p["length"] * dpi // 1200
+                if window < lines:           # the SOF height is less than the real page
+                    i = data.index(b"\xff\xc0")
+                    data = data[:i + 5] + struct.pack(">H", window) + data[i + 7:]
+            else:
+                data = self._jpeg(kind, width, padded, lines, p["gray"], dpi)
             sides[win] = dict(data=data, pos=0, temp=self.temp_no_data, busy=self.busy, done=False)
+        self._last_sides = list(sides.values())
         return dict(sheet=sheet, width=width, padded=padded, lines=lines, sides=sides)
 
     def _read(self, cdb, inlen):
@@ -494,6 +547,9 @@ class Emulator:
             return self._reply(0, 0, ps)
         if dtype != 0:
             return self._check(5, 0x24, 0)
+        mutual = bool(self.params and self.params.get("mutual"))
+        if mutual and inlen != MUTUAL_READ_SIZE:
+            return self._check(5, 0x24, 0)          # test guard: mutual READs ask for 0x20000 bytes
         self.stats["reads"] += 1
         side = cur["sides"][win & 0x80]
         sheet = cur["sheet"]
@@ -526,5 +582,10 @@ class Emulator:
             if win == 0x80 and sheet.jam_mm is not None:
                 self.hopper.clear()
                 self.exit_sensor = True
-            return self._check(0, eom=True, ili=True, data=payload)
+            info = 0
+            if mutual:
+                info = (inlen - 2) - len(chunk) + self.eom_info_error
+                if self.eom_pad:
+                    payload += bytes(inlen - 2 - len(chunk))
+            return self._check(0, eom=True, ili=True, data=payload, info=info)
         return self._reply(0, 0, payload)

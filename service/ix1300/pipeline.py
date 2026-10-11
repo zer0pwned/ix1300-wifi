@@ -37,6 +37,19 @@ try:                                     # optional
 except ImportError:                      # pragma: no cover - depends on the system
     Image = None
 
+# Pillow refuses a large image as a "decompression bomb": a warning above MAX_IMAGE_PIXELS
+# (default 89,478,485) and an error above 2 x MAX_IMAGE_PIXELS. The largest pages of the
+# scanner: 600 dpi x 895 mm = 5184 x 21142 = 109.6 M pixels; long page mode, 300 dpi x
+# 3,070 mm (E9 length 0x23680) = 2592 x 36256 = 94.0 M pixels. This explicit limit accepts
+# them without a warning and refuses images with more than 240 M pixels.
+PIL_MAX_PIXELS = 120_000_000
+if Image is not None:
+    Image.MAX_IMAGE_PIXELS = PIL_MAX_PIXELS
+
+# A page longer than this is a long page (only length = "long" gives one). Its page work
+# uses the memory limits of deskew_and_crop (pipeline.max_decode_mb).
+LONG_PAGE_MM = 900.0
+
 
 def have_pillow():
     return Image is not None
@@ -298,6 +311,7 @@ class Document:
         self.warnings = list(warnings)
         self.blob = Blob(data=pdf) if pdf is not None else Blob(path=path)
         self.job_id = None                # stable ID for the receivers (at-least-once delivery)
+        self.paper_path = "top"           # "top" (chute) or "front" (front slot)
         self.kept = set()                 # (sheet, side) of the pages in the PDF
         self.page_records = []            # size, crop and rotation of the pages in the PDF (raw.json)
 
@@ -355,6 +369,10 @@ DJPEG_OK = (0, 2)            # 2 = warnings only (the scanner JPEGs with a fixed
 
 def djpeg_path():
     return shutil.which(os.environ.get("IX1300_DJPEG", "djpeg"))
+
+
+def cjpeg_path():
+    return shutil.which(os.environ.get("IX1300_CJPEG", "cjpeg"))
 
 
 _WS = b" \t\r\n\x0b\x0c"
@@ -841,13 +859,158 @@ def _new_page(page, data, store):
     return new
 
 
+def is_long_page(page):
+    """True if PAGE is longer than the automatic length maximum (long page mode)."""
+    return page.height * 25.4 / max(1, page.dpi) > LONG_PAGE_MM
+
+
+def decode_bytes(page):
+    """Estimated Pillow memory for a deskew of PAGE: the decoded image, the turned
+    image and one more copy. Pillow keeps "L" in 1 byte, "RGB" in 4 bytes per pixel."""
+    return 3 * page.width * page.height * (1 if page.components == 1 else 4)
+
+
+def decode_allowed(page, cfg):
+    """True if a full Pillow decode of PAGE stays in pipeline.max_decode_mb."""
+    return decode_bytes(page) <= float(cfg.get("max_decode_mb", 192)) * (1 << 20)
+
+
+def _pillow_deskew(page, cfg, angle, crop, store, quality):
+    """Turn PAGE by ANGLE with Pillow (and cut it to the paper with CROP). Return the new page."""
+    img = Image.open(io.BytesIO(page.jpeg))
+    fill = 215 if img.mode == "L" else (215, 215, 215)       # the color of the scanner backing
+    bicubic = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
+    out = img.rotate(angle, resample=bicubic, expand=True, fillcolor=fill)
+    del img
+    if crop:
+        small = out.convert("L")
+        scale = max(1, page.dpi // ANALYSIS_DPI)
+        small = small.reduce(scale) if scale > 1 else small
+        a = analyze(small.tobytes(), small.size[0], small.size[1], page.dpi / float(scale),
+                    int(cfg.get("ink_level", 110)), int(cfg.get("paper_level", 225)))
+        del small
+        tmp = Page(Blob(data=b""), out.size[0], out.size[1], 3, page.dpi)
+        box = _crop_box(a, tmp)
+        if box:
+            out = out.crop(box)
+            page.info["crop_box"] = list(box)
+    log.info("deskew sheet %d %s: %.2f degrees%s", page.sheet + 1, page.side, angle,
+             ", cropped" if crop else "")
+    new = _new_page(page, _encode(out, page, quality), store)
+    new.info["deskew_applied"] = True
+    return new
+
+
+def _stream_crop(page, box, quality, timeout=300):
+    """Cut PAGE to BOX with "djpeg -crop | cjpeg": one new JPEG encode, a few MB of memory.
+
+    libjpeg-turbo djpeg moves the left edge to an iMCU step (8 or 16 pixels). Return the
+    JPEG bytes, or None if the programs are missing or fail.
+    """
+    dj, cj = djpeg_path(), cjpeg_path()
+    if not (dj and cj):
+        return None
+    x0, y0, x1, y1 = box
+    with tempfile.TemporaryDirectory() as tmp:
+        src = page.jpeg_blob.path
+        if not src:
+            src = os.path.join(tmp, "page.jpg")
+            with open(src, "wb") as fh:
+                for chunk in page.jpeg_blob.chunks():
+                    fh.write(chunk)
+        p1 = p2 = None
+        try:
+            p1 = subprocess.Popen([dj, "-crop", "%dx%d+%d+%d" % (x1 - x0, y1 - y0, x0, y0), "-pnm", src],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            p2 = subprocess.Popen([cj, "-quality", str(quality)], stdin=p1.stdout, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+            p1.stdout.close()
+            out, err = p2.communicate(timeout=timeout)
+            p1.wait(timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            for p in (p1, p2):
+                if p is not None and p.poll() is None:
+                    p.kill()
+                    p.wait()
+            log.warning("stream crop failed: %s", e)
+            return None
+    if p1.returncode not in DJPEG_OK or p2.returncode != 0 or jpeg.info(out) is None:
+        log.warning("stream crop failed: djpeg %s, cjpeg %s: %s", p1.returncode, p2.returncode,
+                    err.decode("utf-8", "replace").strip()[:200])
+        return None
+    return out
+
+
+def _long_page(page, cfg, deskew, crop, store, min_angle, quality):
+    """deskew_and_crop for a long page, with a limit for the memory.
+
+    A full Pillow decode of a 3,000 mm page needs much memory (2592 x 35433 pixels:
+    92 MB gray, 367 MB colour for each copy), and jpegtran keeps all coefficients
+    of the page in memory (measured: 256 MB gray, 383 MB colour). So: first cut the
+    page to the paper with djpeg | cjpeg (a few MB), then deskew the narrower page
+    with Pillow only if decode_bytes() stays in pipeline.max_decode_mb.
+    """
+    if crop:
+        box = _crop_box(page_analysis(page, cfg), page)
+        if box is not None:
+            data, method = _stream_crop(page, box, quality), "stream"
+            if data is None and decode_allowed(page, cfg):
+                data, method = _small_crop(page, box, quality), "small"
+            if data is None:
+                log.info("crop of a long page needs djpeg and cjpeg (or a smaller page): skipped")
+            else:
+                log.info("crop sheet %d %s (long page, %s): %dx%d -> %s", page.sheet + 1, page.side, method,
+                         page.width, page.height, "x".join(map(str, (jpeg.info(data) or (0, 0))[:2])))
+                page.info["crop_box"] = list(box)
+                page.info["crop_method"] = method
+                page = _new_page(page, data, store)
+    if not deskew:
+        return page
+    angle = skew_angle(page, cfg)
+    page.info["skew"] = None if angle is None else round(angle, 2)
+    page.info["deskew_applied"] = False
+    if angle is None or abs(angle) < min_angle:
+        return page
+    if not decode_allowed(page, cfg):
+        mb = decode_bytes(page) / float(1 << 20)
+        page.info["deskew_skipped"] = "about %d MB, more than pipeline.max_decode_mb" % round(mb)
+        log.info("deskew sheet %d %s: skipped, the long page (%dx%d) needs about %d MB "
+                 "(pipeline.max_decode_mb = %s)", page.sheet + 1, page.side, page.width, page.height,
+                 round(mb), cfg.get("max_decode_mb", 192))
+        return page
+    if Image is None:
+        log.info("deskew needs Pillow: skipped (%.2f degrees)", angle)
+        return page
+    return _pillow_deskew(page, cfg, angle, crop, store, quality)
+
+
+def _small_crop(page, box, quality):
+    """Crop with jpegtran (lossless) or Pillow. For pages that decode_allowed() accepts."""
+    exe = jpegtran_path()
+    x0, y0, x1, y1 = box
+    if exe:
+        try:
+            r = subprocess.run([exe, "-copy", "all", "-crop", "%dx%d+%d+%d" % (x1 - x0, y1 - y0, x0, y0)],
+                               input=page.jpeg, capture_output=True, timeout=60)
+            if r.returncode == 0 and jpeg.info(r.stdout) is not None:
+                return r.stdout
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("jpegtran crop failed: %s", e)
+    if Image is not None:
+        return _encode(Image.open(io.BytesIO(page.jpeg)).crop(box), page, quality)
+    return None
+
+
 def deskew_and_crop(page, cfg, deskew=True, crop=False, store=None, min_angle=0.3):
     """Straighten the page and/or cut it to the paper box. Return the new page (or PAGE).
 
     Deskew needs Pillow (one new JPEG encode). Crop without deskew uses Pillow,
     else jpegtran (no new encode; the box edges go to 8 or 16 pixel steps).
+    A long page (length = "long") has its own steps with memory limits (_long_page).
     """
     quality = int(cfg.get("jpeg_quality", 90))
+    if is_long_page(page):
+        return _long_page(page, cfg, deskew, crop, store, min_angle, quality)
     angle = skew_angle(page, cfg) if deskew else None
     page.info["skew"] = None if angle is None else round(angle, 2)     # measured, not always applied
     page.info["deskew_applied"] = False
@@ -855,28 +1018,7 @@ def deskew_and_crop(page, cfg, deskew=True, crop=False, store=None, min_angle=0.
         if Image is None:
             log.info("deskew needs Pillow: skipped (%.2f degrees)", angle)
         else:
-            img = Image.open(io.BytesIO(page.jpeg))
-            fill = 215 if img.mode == "L" else (215, 215, 215)       # the color of the scanner backing
-            bicubic = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
-            out = img.rotate(angle, resample=bicubic, expand=True, fillcolor=fill)
-            del img
-            if crop:
-                small = out.convert("L")
-                scale = max(1, page.dpi // ANALYSIS_DPI)
-                small = small.reduce(scale) if scale > 1 else small
-                a = analyze(small.tobytes(), small.size[0], small.size[1], page.dpi / float(scale),
-                            int(cfg.get("ink_level", 110)), int(cfg.get("paper_level", 225)))
-                del small
-                tmp = Page(Blob(data=b""), out.size[0], out.size[1], 3, page.dpi)
-                box = _crop_box(a, tmp)
-                if box:
-                    out = out.crop(box)
-                    page.info["crop_box"] = list(box)
-            log.info("deskew sheet %d %s: %.2f degrees%s", page.sheet + 1, page.side, angle,
-                     ", cropped" if crop else "")
-            new = _new_page(page, _encode(out, page, quality), store)
-            new.info["deskew_applied"] = True
-            return new
+            return _pillow_deskew(page, cfg, angle, crop, store, quality)
     if not crop:
         return page
     box = _crop_box(page_analysis(page, cfg), page)

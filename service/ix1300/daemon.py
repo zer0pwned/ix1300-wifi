@@ -416,8 +416,7 @@ class Service:
             name = svc["short_press_profile"]
             if trg.long_press and svc.get("long_press_profile"):
                 name = svc["long_press_profile"]
-            log.info("scan button (%s press): profile %s", "long" if trg.long_press else "short", name)
-            self.run_job(name)
+            self.run_job(name, press="long" if trg.long_press else "short")
             self._drain_triggers()
         elif trg.code == TRG_POWER_ON:
             log.info("scanner power on: reserve again")
@@ -485,38 +484,60 @@ class Service:
         return (self.stop_event.is_set() and self.stop_deadline is not None and
                 self.clock() >= self.stop_deadline)
 
-    def run_job(self, profile_name):
-        """Scan with one profile. The caller must have a reserve.
+    def paper_path(self):
+        """Read C2 one time before a job. Return "top", "front" or None (no paper).
+
+        The sensor bits are valid before the first sheet (PROTOCOL.md 2.1 and 8.9):
+        hopper not empty: top chute. Hopper empty and the feed sensor set: front
+        slot. The exit sensor bit alone is not paper: it can stay set after a halt.
+        If C2 fails, return "top" (E0 then decides, as with check_paper = false).
+        """
+        try:
+            return self.scanner.hw_status().paper_path
+        except (OSError, IxError) as e:
+            log.debug("paper check: %s", short_error(e))
+            return "top"
+
+    def run_job(self, profile_name, press="short"):
+        """Scan with one profile (PRESS: "short" or "long", for the log). The caller must have a reserve.
 
         Each complete sheet goes to disk and to the page workers at once
         (Job.add_sheet). Only complete sheets go into the document. If an error
         stops the scan before the first complete sheet, no document is made.
+        A sheet in the front slot (and no paper in the chute) gives a front slot
+        job, with service.front_slot_profile if it is set.
         """
         if not self._admit():
             return None
-        # Start no job with an empty chute. An empty job puts the scanner into its
+        # Start no job with no paper. An empty job puts the scanner into its
         # "after the last sheet" state: the next 3 s hold then returns the stacker
-        # and sends no event [HW]. The hopper bit is valid before the first sheet.
-        if self.cfg.service.get("check_paper", True):
-            try:
-                empty = self.scanner.hw_status().hopper_empty
-            except (OSError, IxError) as e:
-                log.debug("paper check: %s", short_error(e))
-                empty = False
-            if empty:
-                log.warning("scan button (%s): no paper in the chute; no job started", profile_name)
+        # and sends no event [HW]. The sensor bits are valid before the first sheet.
+        path = self.paper_path()
+        if path is None:
+            if self.cfg.service.get("check_paper", True):
+                log.warning("scan button (%s press): no paper in the chute or the front slot; no job started",
+                            press)
                 return None
+            path = "top"                       # check_paper = false: E0 decides
+        if path == "front" and self.cfg.service.get("front_slot_profile"):
+            profile_name = self.cfg.service["front_slot_profile"]
+        log.info("scan button (%s press): profile %s, %s", press, profile_name,
+                 "front slot" if path == "front" else "top chute")
         try:
             profile = self.cfg.profile(profile_name)
-            job = Job(self, profile)
-        except (OSError, ConfigError) as e:
+            settings = profile.scan_settings(path)
+            job = Job(self, profile, paper_path=path)
+            if settings.long_page:
+                job.dir.m["long_page"] = True
+        except (OSError, ConfigError, ValueError) as e:
             log.error("scan not started: %s", e)
             return None
         result, error = None, None
         t0 = time.monotonic()
         self.scanner.abort = self._abort_read
         try:
-            result = self.scanner.scan(profile.scan_settings(), on_sheet=job.add_sheet, cancel=self._cancel_scan)
+            result = self.scanner.scan(settings, on_sheet=job.add_sheet,
+                                       cancel=self._cancel_scan)
         except PaperLost as e:
             result, error = e.result, e
             log.error("scan stopped after %d complete sheets: paper lost in the middle of a sheet", job.sheets)
@@ -697,8 +718,10 @@ class Service:
                 self._settle_failed(jd)
             return None
         doc.job_id = jd.id
+        doc.paper_path = jd.m.get("paper_path") or "top"
         jd.m["document"] = dict(filename=doc.filename, title=doc.title, profile=doc.profile, pages=doc.pages,
-                                receipt=doc.receipt, created=doc.created, warnings=doc.warnings, size=doc.size)
+                                receipt=doc.receipt, created=doc.created, warnings=doc.warnings, size=doc.size,
+                                paper_path=doc.paper_path)
         names = list(job.profile.outputs or self.outputs.keys()) if send else []
         jd.m["outputs"] = {n: {"ok": False, "attempts": 0} for n in names}
         jd.m["state"] = "delivering"
@@ -803,6 +826,7 @@ class Service:
         doc = Document(m["filename"], m["title"], m["profile"], m["pages"], m["receipt"], m["created"],
                        m.get("warnings") or [], path=jd.pdf_path())
         doc.job_id = jd.id
+        doc.paper_path = m.get("paper_path") or jd.m.get("paper_path") or "top"
         return doc
 
     def retry_unsent(self, force=False):
@@ -926,7 +950,8 @@ class Service:
 class Job:
     """One button press: the sheets on disk and the prepared pages."""
 
-    def __init__(self, svc, profile, jobdir=None):
+    def __init__(self, svc, profile, jobdir=None, paper_path="top"):
+        """PAPER_PATH: "top" or "front" (a new job only; a JOBDIR keeps its manifest value)."""
         self.svc = svc
         self.profile = profile
         self.sheets = 0
@@ -934,7 +959,7 @@ class Job:
         self.failures = []                # texts: pages that are not in the document
         self.warnings = []
         self.deliver = False
-        self.dir = jobdir or JobDir.create(svc.work_dir, profile.name)
+        self.dir = jobdir or JobDir.create(svc.work_dir, profile.name, paper_path)
         self.dir.claim()                  # this service owns the job until process() is done
         self.store = svc.pipeline.store_for(self.dir.path, svc.budget)
 

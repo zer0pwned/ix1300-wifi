@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from . import outputs as outputs_mod
-from .protocol import AUTO_LENGTH, DPI_VALUES, ScanSettings, mm_to_length
+from .protocol import AUTO_LENGTH, DPI_VALUES, LONG_DPI_VALUES, LONG_MAX_MM, ScanSettings, mm_to_length
+
+log = logging.getLogger("ix1300.config")
 
 try:
     import tomllib as _tomllib            # Python 3.11+
@@ -65,6 +67,7 @@ DEFAULTS = {
     "service": {
         "short_press_profile": "default",
         "long_press_profile": "",         # empty: same as the short press
+        "front_slot_profile": "",         # front slot job: this profile (empty: the profile of the press)
         "work_dir": "/data",
         "log_level": "INFO",
         "deliver_partial": True,
@@ -96,6 +99,7 @@ DEFAULTS = {
         "jpeg_quality": 90,
         "workers": 1,                     # threads for page work (blank test, OSD, deskew)
         "max_memory_mb": 64,              # JPEG data of all jobs in memory; more goes into work_dir files
+        "max_decode_mb": 192,             # long pages: largest Pillow memory for deskew and crop (MB)
         "tesseract_timeout": 60,          # seconds for each page
     },
     "outputs": {},
@@ -110,7 +114,7 @@ PROFILE_DEFAULTS = {
     "duplex": True,
     "paper_face": "down",               # order only: down = back side first (normal load)
     "blank_skip": True,
-    "length": "auto",                   # "auto" or millimetres
+    "length": "auto",                   # "auto", "long" (top chute, up to 3,000 mm) or millimetres
     "rotate": None,                     # None: use pipeline.rotate
     "deskew": None,
     "crop": "auto",                     # auto (receipts), true, false: cut the page to the paper
@@ -439,13 +443,29 @@ class Profile:
     outputs: List[str] = field(default_factory=list)
 
     @property
+    def long_page(self):
+        """True for length = "long" (long page mode, top chute only)."""
+        return self.length == "long"
+
+    @property
     def length_units(self):
-        if self.length in ("auto", None, 0, ""):
+        if self.length in ("auto", "long", None, 0, ""):
             return AUTO_LENGTH
         return min(AUTO_LENGTH, mm_to_length(float(self.length)))
 
-    def scan_settings(self):
-        return ScanSettings(dpi=self.dpi, color=self.color, length=self.length_units)
+    def scan_settings(self, path="top"):
+        """PATH: "top" (chute) or "front" (front slot).
+
+        length = "long" works only in the top chute. A front slot job then uses
+        the automatic length (up to 895 mm), with a warning.
+        """
+        long_page = self.long_page
+        if long_page and path != "top":
+            log.warning("profile %s: length = \"long\" works only in the top chute; the front slot job "
+                        "uses the automatic length (up to 895 mm)", self.name)
+            long_page = False
+        return ScanSettings(dpi=self.dpi, color=self.color, length=self.length_units, path=path,
+                            long_page=long_page)
 
 
 def _check_profile_types(name, raw):
@@ -492,12 +512,19 @@ def _profile(name, raw):
         prof.rotate = _rotation(prof.rotate, allow_none=True)
     except ValueError as e:
         raise ConfigError("profile %s: %s" % (name, e))
-    if prof.length != "auto":
+    if isinstance(prof.length, str) and prof.length.strip().lower() in ("auto", "long"):
+        prof.length = prof.length.strip().lower()
+    if prof.length == "long":
+        if prof.dpi not in LONG_DPI_VALUES:
+            raise ConfigError("profile %s: length = \"long\" needs dpi %s, not %d (%d mm at 600 dpi is more "
+                              "than a JPEG can keep)" % (name, ", ".join(map(str, LONG_DPI_VALUES)), prof.dpi,
+                                                         LONG_MAX_MM))
+    elif prof.length != "auto":
         try:
-            if not 10 <= float(prof.length) <= 895:
+            if isinstance(prof.length, bool) or not 10 <= float(prof.length) <= 895:
                 raise ValueError
         except (TypeError, ValueError):
-            raise ConfigError("profile %s: length must be \"auto\" or 10..895 (mm)" % name)
+            raise ConfigError("profile %s: length must be \"auto\", \"long\" or 10..895 (mm)" % name)
     return prof
 
 
@@ -532,6 +559,7 @@ RANGES = {
     "pipeline": {"blank_ink_ratio": (0, 1), "ink_level": (1, 255), "paper_level": (1, 255),
                  "blank_bytes_per_pixel": (0, None), "receipt_ratio": (0.1, None), "osd_min_confidence": (0, None),
                  "jpeg_quality": (1, 100), "workers": (1, 16), "max_memory_mb": (0, None),
+                 "max_decode_mb": (1, None),
                  "tesseract_timeout": (1, 86400)},
 }
 INTEGER_KEYS = {"search_port", "trigger_port", "keepalive_failures", "keepalive_repeat", "reserve_timeout",
@@ -636,7 +664,7 @@ class Config:
             except ValueError:
                 raise ConfigError("scanner.host_id must be 16 hex digits")
         self.scanner["host_id"] = hid.upper()
-        for key in ("short_press_profile", "long_press_profile"):
+        for key in ("short_press_profile", "long_press_profile", "front_slot_profile"):
             name = self.service.get(key)
             if name and name not in self.profiles:
                 raise ConfigError("service.%s: no profile %r" % (key, name))

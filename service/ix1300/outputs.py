@@ -305,6 +305,7 @@ class WebhookOutput(Output):
                   ("created", time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(doc.created)))]
         if getattr(doc, "job_id", None):
             fields.append(("job_id", doc.job_id))
+        fields.append(("paper_path", getattr(doc, "paper_path", None) or "top"))
         if doc.warnings:
             fields.append(("warnings", json.dumps(doc.warnings)))
         for k, v in (self.cfg.get("fields") or {}).items():

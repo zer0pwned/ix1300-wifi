@@ -64,6 +64,19 @@ The reply has the same layout over USB and over the network (Port1).
 | 4, bit 5 | Scan button, long press |
 | 0x20..0x27 | Registered host ID (8 bytes; `FF..FF` = no ID). Only in a reply of 0x30 bytes |
 
+Paper path before a job [HW] (measured over Wi-Fi with one A4 sheet in the
+front slot): byte 2 = `80`, byte 3 = `81` (chute empty, exit sensor set).
+After the front slot job, the path is clear: byte 2 = `00`, byte 3 = `80`.
+The exit bit (byte 3 bit 0) can stay set with no paper (seen after a halt).
+Thus do not use the exit bit alone. Before a job:
+
+- Byte 3 bit 7 = 0: paper in the top chute.
+- Byte 3 bit 7 = 1 and byte 2 bit 7 = 1: a sheet in the front slot.
+- Else: no paper (also with byte 2 = `00`, byte 3 = `81`).
+
+These rules apply only before the first sheet. During a job the scanner
+pulls sheets into the paper path (section 8.5).
+
 The button bits show over USB. Over the network without a reserve, the
 button bits did not change (60 s test) [HW]. Use the trigger packets
 (section 6) for the button.
@@ -331,7 +344,7 @@ Rules [HW]:
   works with paper in the chute (3 of 3 tests).
 - With no paper in the chute, a hold of 3 s just after a job runs the
   rollers, with no blue flash and no event. Read C2 before a job, and start
-  no job with an empty chute.
+  no job with no paper (section 2.1).
 - The button works also when the USB cable is connected.
 
 Power off [HW]: the scanner turns itself off after about 4 hours with no
@@ -432,6 +445,18 @@ D4 (0x50 bytes): 32 bytes of parameters, then a 48-byte window descriptor.
 Only 300 dpi and the automatic color mode were tested on the scanner. The
 other resolutions and color modes are [NV].
 
+Front slot (return path) job [HW]: three values change. All other bytes
+are the same as for the top chute.
+
+| Field | Top chute | Front slot |
+|---|---|---|
+| E9 +8, BE32 pre-read length | `00 00 43 50` | `00 00 44 10` |
+| D4 parameters, byte 1 | `03` | `06` |
+| D4 parameters, byte 4 | `88` | `00` |
+
+Front slot D4 parameters: `00 06 01 01 00 00 C1 80 80 80 80 80 80 00`,
+17 zero bytes, `30`.
+
 ### 8.3 Image READ
 
 CDB: `28 00 00 00 00 WW 30 00 00 00 PP SS`
@@ -489,6 +514,10 @@ READ replies for each side, about 3.5 MB for each side).
   first READ of a sheet) gives sense 3/80/03 (no paper). Then send D6.
 - At that time, the C2 exit bit can be set without a jam.
 
+- Front slot: after the one sheet, the next E0 gave CHECK CONDITION, sense
+  3/80/03 (no paper), after 0.1 s [HW]. The same loop thus ends a front
+  slot job after one sheet (section 8.9).
+
 ### 8.6 Stop with sheets left (D8) [HW]
 
 Measured with 5 sheets in the chute, after sheet 1:
@@ -530,6 +559,100 @@ last sheet: a set exit bit then shows a probable jam.
 A skewed long receipt can jam or drift. Move the paper guides against the
 receipt edges.
 
+### 8.9 Front slot (return path) [HW]
+
+Measured over Wi-Fi: two front slot scans of one A4 sheet, 300 dpi, duplex.
+
+- Detection: read C2 before the job (section 2.1). Chute empty and paper at
+  the feed sensor: a sheet is in the front slot.
+- The command flow is the same as for the top chute (section 8.1), with the
+  front slot E9 and D4 values (section 8.2). The front side is window
+  `00`, the back side is window `80`. The pixel size READ and the JPEG
+  height correction (section 8.4) are the same.
+- Both sides came, 2592 x 3456 pixels at 300 dpi. The images are upside
+  down, as for the top chute.
+- After the sheet, E0 gives sense 3/80/03 (no paper): the job ends after
+  one sheet. The sheet comes back out at the front.
+- The front slot takes one sheet at a time. It does not take long paper:
+  a receipt longer than an A4 sheet jammed in the load step (over USB).
+- The SANE `fujitsu` backend calls this path "Card Front", "Card Back" and
+  "Card Duplex". The `ix1300` SANE backend uses the same names.
+
+### 8.10 Long page mode [NV]
+
+The service uses this mode for the profile setting `length = "long"`
+(documents up to 3,000 mm, top chute only). ScanSnap Home uses it for long
+paper (its paper code 0x8003). All values come from the ScanSnap Home
+programs (`SshResident`, `SsSvcPCWIFIFrmwk`, macOS arm64). The addresses
+are in brackets. No hardware test confirmed the scanner side of this mode.
+
+Settings. Only two values change. All other bytes are the same as for the
+automatic length (section 8.2):
+
+| Field | Automatic length [HW] | Long page mode [NV] | Source in ScanSnap Home |
+|---|---|---|---|
+| E9 +8, BE32 pre-read length | `00 00 43 50` | `00 02 36 80` (3,069.6 mm) | `DoSetPreReadMode` 0x10017d940 |
+| E9 +4, BE32 width | `00 00 28 80` | `00 00 28 80` | 0x10017d63c |
+| D4 parameters, byte 13 | `00` | `80` (mutual transfer) | `SetWindow` 0x10017e060-0x10017e094 |
+| D4 parameters, byte 28 | `00` | `00` | 0x10017e0fc: `30` or `20` only for the front slot path |
+| D4 descriptor +14, window length | `00 00 A5 43` | `00 00 A5 43` (also at 600 dpi) | `DoSetWindowInfo` 0x100156eb4, 0x100156f00 |
+| READ data-in length (bytes 6..8) | `30 00 00` | `02 00 00` | `TelRead` 0x3a834, `MaxTransferSize_of_MutualRead` |
+
+- The framework sets its "mutual" flag when D4 parameter byte 13 is 0x80
+  (0x207f4). Then each image READ asks for 0x20000 bytes (0x29ebc).
+- ScanSnap Home sends the E9 length 0x23680 only when its value
+  [obj+0x1ec] is not 2; else 0x236C0 (0x45A4 at 600 dpi). The meaning of
+  that value is not known. The service sends 0x23680.
+- For the front slot path, ScanSnap Home sends the E9 length 0x4410 for
+  all paper codes (0x10017d7cc). The service uses the automatic length for
+  a front slot job, also with `length = "long"`.
+- ScanSnap Home also uses the mutual transfer at 600 x 600 dpi. The service
+  does not: a 3,000 mm page at 600 dpi has 70,866 lines, more than a JPEG
+  can keep (65,535). `length = "long"` needs 150, 200 or 300 dpi.
+
+Mutual READ (`getImageDataForMutualTransfer` 0x241d4):
+
+CDB: `28 00 00 00 00 WW 02 00 00 00 PP SS`
+
+1. Page IDs: front = c + 1, back = c + 2. The counter c starts at 0xFF
+   and goes up by 2 for each sheet (0x242ac-0x242bc). So the page IDs are
+   the same as in section 8.3: 0 and 1, then 2 and 3.
+2. One sequence ID `SS` for the two windows. It starts at 0 and goes up by
+   1 after each step (0x24730).
+3. In each step: one READ for window 0x00, then one READ for window 0x80.
+   A side that ended gets no more READs. The loop stops when both sides
+   ended (0x2472c).
+4. Each reply has the 2-byte prefix (page ID, sequence ID), then up to
+   0x1FFFE image bytes. With status GOOD, the host adds the image bytes to
+   the side of that window.
+5. CHECK CONDITION: send REQUEST SENSE. EOM (sense byte 2, bit 6) must be
+   set (0x24400). ILI is not examined. The sense key must be 0 (0x246c0).
+   Then the side ended. The image bytes of this last reply are
+   (0x20000 - 2) - (sense information, bytes 3..6, BE32) (0x24404-0x24414).
+   If the information is more than 0x1FFFE, or the result is 0, the last
+   reply adds no bytes (0x24420-0x24428).
+6. The result is two buffers: the front image and the back image. A
+   front-only scan in ScanSnap Home reads both and drops the back
+   (`DoGetImageData` 0x10017f3a4-0x10017f3c8).
+7. ScanSnap Home does not send the same READ again in this loop: a CHECK
+   CONDITION without EOM is an error (0x2478c). The service sends the same
+   READ again for status 8 (busy) and sense 3/80/13, as in section 8.3.
+8. Pixel size: ScanSnap Home reads data type 0x80 one time after the sheet,
+   for the last window and its page ID (`getImageInfo` 0x21d28-0x21d40).
+   The service reads it for each window, as in section 8.4.
+
+Rules of the service for the items that are not known:
+
+- If the cut of step 5 removes the JPEG end marker (`FF D9`), and the full
+  reply ends with it, the service keeps all bytes and logs a warning.
+- The JPEG height of a long page is not known. The service writes the real
+  length from the pixel size into the SOF height. In long page mode it also
+  makes the height larger, up to the E9 length (36,256 lines at 300 dpi).
+- `scanner.side_timeout` is the limit for the two sides of one sheet.
+- The job manifest and `raw.json` record, for each side: the READ count,
+  the reply count with data, the image bytes, the sense information of the
+  end, and the bytes cut (`reads`).
+
 ## 9. Sides and page order [HW]
 
 - The scanner feeds the top sheet of the stack first.
@@ -547,7 +670,8 @@ receipt edges.
 
 - TLS (the "secure" modes of the scanner) is not described and not
   implemented.
-- The front slot (return path) works over USB with the `fujitsu` backend
-  (A4 worked; a long receipt jammed in the load step). It was not tested
-  over Wi-Fi.
+- The front slot (return path) was tested with one A4 sheet at 300 dpi
+  over Wi-Fi (section 8.9), and over USB with the `fujitsu` backend. Other
+  resolutions, color modes and paper sizes in the front slot are [NV].
+- The long page mode (section 8.10) was tested with the emulator only.
 - Only firmware 0J00 and one scanner were tested.

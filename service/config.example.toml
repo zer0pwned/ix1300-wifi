@@ -53,7 +53,8 @@ retry_min = 2
 retry_max = 10
 
 [service]
-# true: read the paper sensor before a job. With an empty chute the service starts no job.
+# true: read the paper sensors before a job. With no paper in the chute and no sheet in
+# the front slot, the service starts no job.
 # (An empty job makes the next 3 s hold return the stacker instead of a long press.)
 check_paper = true
 # Profile for a short press and for a long press of the Scan button.
@@ -61,6 +62,11 @@ check_paper = true
 # Each profile can send to its own outputs (README, "Separate endpoints for each profile").
 short_press_profile = "default"
 long_press_profile = "receipt"
+# Front slot (return path): put one sheet into the front slot, then push the Scan button.
+# The service scans this one sheet (both sides); the sheet comes back out at the front.
+# Empty: the profile of the press. Else: the name of a profile for all front slot jobs.
+# The front slot takes one sheet at a time and no long paper (a long receipt jams).
+front_slot_profile = ""
 # Job files: work_dir/jobs (in work), work_dir/unsent (an output failed),
 # work_dir/failed (no PDF, or pages missing), work_dir/raw (keep_raw).
 work_dir = "/data"
@@ -122,6 +128,11 @@ workers = 1
 # service.work_dir. A 300 dpi colour side is 0.5 to 3.5 MB. This limit is for the JPEG data only:
 # deskew (Pillow), OCR and tesseract use more memory. Refer to README, "Small computers".
 max_memory_mb = 64
+# Long pages (length = "long", more than 900 mm): the largest Pillow memory (MB) for deskew.
+# The service first cuts a long page to the paper with djpeg and cjpeg (a few MB). A deskew
+# that needs more memory is skipped (raw.json: deskew_skipped). A 3,000 mm gray receipt,
+# 80 mm wide, at 300 dpi needs about 96 MB; the same page in colour about 383 MB.
+max_decode_mb = 192
 # Seconds for each tesseract run (OSD: each page; OCR: each page of the document).
 tesseract_timeout = 60
 title_format = "Scan {profile} %Y-%m-%d %H:%M:%S"
@@ -170,7 +181,7 @@ color = "auto"                # auto, color or gray
 duplex = true                 # false: one side for each sheet: the side with more print
 paper_face = "down"           # order only: down = back side first (printed side down in the chute)
 blank_skip = true
-length = "auto"               # "auto" (up to 895 mm) or a length in mm
+length = "auto"               # "auto" (up to 895 mm), "long" (up to 3,000 mm) or a length in mm
 # rotate = "auto"             # change pipeline.rotate for this profile
 # ocr = false
 # deskew = false              # straighten the page (needs Pillow)
@@ -183,7 +194,9 @@ dpi = 300
 color = "auto"
 duplex = false
 blank_skip = true
-length = "auto"
+# Long page mode for long receipts: up to 3,000 mm, top chute only, dpi 150..300.
+# A sheet in the front slot gets the automatic length (up to 895 mm), with a warning.
+length = "long"
 # deskew decodes the full page with Pillow (much memory on a long receipt). Small computers: false.
 deskew = true
 crop = true

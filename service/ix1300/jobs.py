@@ -26,7 +26,8 @@ import subprocess
 import time
 
 from . import jpeg
-from .pipeline import DIR_MODE, Image, commit_file, djpeg_path, jpegtran_path, sync_dir, tesseract_path, write_file
+from .pipeline import (DIR_MODE, Image, cjpeg_path, commit_file, djpeg_path, jpegtran_path, sync_dir,
+                       tesseract_path, write_file)
 from .protocol import Side
 
 log = logging.getLogger("ix1300.jobs")
@@ -83,14 +84,17 @@ class JobDir:
         return os.path.dirname(os.path.dirname(self.path))
 
     @classmethod
-    def create(cls, work_dir, profile):
-        """Make a new job directory in work_dir/jobs. Raise OSError if this is not possible."""
+    def create(cls, work_dir, profile, paper_path="top"):
+        """Make a new job directory in work_dir/jobs. Raise OSError if this is not possible.
+
+        PAPER_PATH: "top" (chute) or "front" (front slot)."""
         jid = new_job_id()
         base = private_dir(os.path.join(work_dir, JOBS))
         path = os.path.join(base, jid)
         os.mkdir(path, DIR_MODE)
-        job = cls(path, dict(id=jid, profile=profile, created=time.time(), state="scanning", sheets=[],
-                             warnings=[], deliver=None, outputs={}, document=None, attempts=0, error=None))
+        job = cls(path, dict(id=jid, profile=profile, paper_path=paper_path, created=time.time(), state="scanning",
+                             sheets=[], warnings=[], deliver=None, outputs={}, document=None, attempts=0,
+                             error=None))
         job.save()
         sync_dir(base)
         return job
@@ -132,6 +136,8 @@ class JobDir:
             write_file(os.path.join(self.path, fn), [s.jpeg], sync=True)
             s.path = os.path.join(self.path, fn)
             names[s.side] = dict(file=fn, dpi=s.dpi, width=s.width, lines=s.lines, page_id=s.page_id)
+            if getattr(s, "read", None):              # long page mode: READ counts (raw.json)
+                names[s.side]["read"] = dict(s.read)
         self.m["sheets"].append(names)
         try:
             self.save()
@@ -334,7 +340,8 @@ def tool_versions():
     if Image is not None:
         import PIL
         pil = getattr(PIL, "__version__", "yes")
-    out = dict(pillow=pil, djpeg=djpeg_path(), jpegtran=jpegtran_path(), tesseract=tesseract_path())
+    out = dict(pillow=pil, djpeg=djpeg_path(), cjpeg=cjpeg_path(), jpegtran=jpegtran_path(),
+               tesseract=tesseract_path())
     if out["tesseract"]:
         try:
             r = subprocess.run([out["tesseract"], "--version"], capture_output=True, text=True, timeout=10)
@@ -370,8 +377,13 @@ def keep_raw(job, pages, doc, profile, pipeline_cfg, max_jobs):
                          errors=p.errors, ink_ratio=orig.get("ink_ratio"), original=orig, delivered=delivered))
     data = dict(id=job.id, profile=profile.name, profile_settings=dict(
         dpi=profile.dpi, duplex=profile.duplex, paper_face=profile.paper_face, crop=profile.crop,
-        deskew=profile.deskew, rotate=profile.rotate, receipt=profile.receipt, blank_skip=profile.blank_skip),
-        pipeline=dict(pipeline_cfg), tools=tool_versions(), pages=info)
+        deskew=profile.deskew, rotate=profile.rotate, receipt=profile.receipt, blank_skip=profile.blank_skip,
+        length=profile.length),
+        pipeline=dict(pipeline_cfg), tools=tool_versions(), paper_path=job.m.get("paper_path") or "top",
+        long_page=bool(job.m.get("long_page")),
+        reads=[{name: d["read"] for name, d in sheet.items() if isinstance(d, dict) and d.get("read")}
+               for sheet in job.m["sheets"]],
+        pages=info)
     commit_file(os.path.join(dest, "raw.json"), [json.dumps(data, indent=1, default=str).encode()])
     old = sorted(n for n in os.listdir(base) if os.path.isdir(os.path.join(base, n)))
     for n in old[:max(0, len(old) - max_jobs)]:

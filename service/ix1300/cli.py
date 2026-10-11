@@ -59,7 +59,8 @@ def cmd_status(args):
         reg = st.host_id
         print("registered  %s%s" % (reg or "none", "" if reg is None or reg == cfg.scanner["host_id"]
                                     else "  <- not our host ID: reserve gives -6"))
-        print("paper       %s" % ("no paper in the hopper" if st.hopper_empty else "paper in the hopper"))
+        print("paper       %s" % {"top": "paper in the hopper", "front": "paper in the front slot"}.get(
+            st.paper_path, "no paper in the hopper or the front slot"))
     except IxError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
@@ -107,7 +108,19 @@ def cmd_scan(args):
                     write_file(os.path.join(args.raw, "sheet%02d_%s.jpg" % (s.sheet + 1, s.side)), [s.jpeg])
 
         try:
-            result = sc.scan(prof.scan_settings(), on_sheet=on_sheet)
+            path = "top"
+            try:
+                path = sc.hw_status().paper_path or "top"     # no paper: E0 decides (exit code 3)
+            except (OSError, IxError) as e:
+                log.debug("paper check: %s", e)
+            if path == "front":
+                print("front slot: one sheet")
+                job.dir.m["paper_path"] = "front"
+            settings = prof.scan_settings(path)
+            if settings.long_page:
+                print("long page mode (up to 3,000 mm)")
+                job.dir.m["long_page"] = True
+            result = sc.scan(settings, on_sheet=on_sheet)
         except Exception as e:                    # also a failed side file: the job keeps what is on disk
             result, error = getattr(e, "result", None), e
             if not isinstance(e, (IxError, OSError)):

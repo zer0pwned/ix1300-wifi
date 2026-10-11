@@ -94,7 +94,7 @@ Environment variables change single values: `IX1300_<SECTION>__<KEY>`, for examp
 
 Limits for bad or slow data from the network (section `[scanner]`): `frame_timeout` (120 s for one reply), `side_timeout` (600 s for one side), `max_side_mb` (64 MB for one side), `data_timeout` (60 s without image data). A reply can be at most the requested length plus 64 bytes.
 
-`service.keep_raw = true` keeps a copy of the original sheets of each job (after the height fix, before all other work) in `work_dir/raw/<job ID>`, with `raw.json`: the profile and pipeline settings, the decoder and OSD programs, and for each side the blank decision and two records. `original` has the size and the measured values of the scanner JPEG (the input of the blank test and the side choice). `delivered` has the page in the PDF: size after crop and deskew, measured values of the cut page (if measured), crop box, measured skew, `deskew_applied`, and the final rotation. `delivered` is `null` for a side that is not in the PDF. Only the newest `keep_raw_max_jobs` (20) directories stay. Caution: the copies contain the full documents.
+`service.keep_raw = true` keeps a copy of the original sheets of each job (after the height fix, before all other work) in `work_dir/raw/<job ID>`, with `raw.json`: the profile and pipeline settings, the paper path (`top` or `front`), the decoder and OSD programs, and for each side the blank decision and two records. `original` has the size and the measured values of the scanner JPEG (the input of the blank test and the side choice). `delivered` has the page in the PDF: size after crop and deskew, measured values of the cut page (if measured), crop box, measured skew, `deskew_applied`, and the final rotation. `delivered` is `null` for a side that is not in the PDF. Only the newest `keep_raw_max_jobs` (20) directories stay. Caution: the copies contain the full documents.
 
 ### 4.1 Profiles
 
@@ -106,13 +106,13 @@ Limits for bad or slow data from the network (section `[scanner]`): `frame_timeo
 | `paper_face` | order only. `down`: back side first (printed side down in the chute, normal). `up`: front side first | `down` |
 | `crop` | cut the page to the paper: `auto` (receipts only), `true`, `false` | `auto` |
 | `blank_skip` | remove blank sides | `true` |
-| `length` | `auto` (up to 895 mm) or a length in mm | `auto` |
+| `length` | `auto` (up to 895 mm), `long` (long page mode, up to 3,000 mm, top chute only) or a length in mm (10 to 895) | `auto` |
 | `rotate` | `auto`, 0, 90, 180, 270 (empty: `pipeline.rotate`) | empty |
 | `deskew`, `ocr` | `true`/`false` (empty: the pipeline value) | empty |
 | `receipt` | `auto`, `yes`, `no` | `auto` |
 | `outputs` | names of outputs. Empty list: all outputs | `[]` |
 
-`service.short_press_profile` and `service.long_press_profile` select the profile for each press.
+`service.short_press_profile` and `service.long_press_profile` select the profile for each press. `service.front_slot_profile` (empty by default) selects the profile for a front slot job.
 
 A button press always scans the whole stack: the scanner feeds all sheets in the chute in one job. There is no page limit. Load only the sheets that you want to scan.
 
@@ -122,8 +122,21 @@ A button press always scans the whole stack: the scanner feeds all sheets in the
 |---|---|
 | Short press (push and release) | `service.short_press_profile` |
 | Long press: hold the Scan button until it flashes blue (about 3 s), then release | `service.long_press_profile` (empty: the short press profile) |
+| Front slot: put one sheet into the front slot (chute empty), then a short or long press | `service.front_slot_profile` (empty: the profile of the press) |
 
-With an empty chute, a press starts no job (`service.check_paper = true`). The scanner sends one event for each press. A long press works only with paper in the chute.
+**Front slot (return path):** before each job, the service reads the paper sensors (C2) one time. Paper in the chute gives a normal job. An empty chute and paper at the feed sensor gives a front slot job: the service scans the one sheet (both sides), and the sheet comes back out at the front. The log shows the paper path (for example `scan button (short press): profile default, front slot`). The front slot takes one sheet at a time, and no long paper: a receipt longer than an A4 sheet jams. The job manifest, `raw.json`, the webhook (field `paper_path`) and the document data in the manifest record the paper path: `top` or `front`.
+
+**Long receipts (long page mode):** `length = "long"` scans documents up to 3,000 mm (the limit of the scanner) from the top chute. `config.example.toml` sets it in the `receipt` profile. So hold the Scan button until it flashes blue (long press): the receipt profile then scans in long page mode. The short press (`default` profile) keeps `length = "auto"` (up to 895 mm). Rules and limits:
+
+- Top chute only. If the sheet is in the front slot, the job uses the automatic length (up to 895 mm), and the log shows a warning. The front slot does not take long paper.
+- `dpi` must be 150, 200 or 300. The service does not accept `length = "long"` with 600 dpi: a JPEG cannot keep the 70,866 lines of a 3,000 mm page at 600 dpi.
+- The scanner sends both sides of the sheet together (mutual transfer, READs of 128 KB). The log shows `long page mode: E9 length 0x23680, D4 byte 13 = 0x80, mutual READ of 0x20000 bytes` at the start of the job.
+- One side of 3,000 mm at 300 dpi has 35,433 lines (2,592 pixels wide). Its JPEG is about 1 to 3 MB for a receipt, and up to about 35 MB for a full colour page. `scanner.max_side_mb` (64) is sufficient. `scanner.side_timeout` (600 s) is the limit for the two sides of one sheet.
+- Guide the long paper with your hand, and keep the paper guides against the receipt edges. A skewed long receipt can jam.
+- The job manifest and `raw.json` record the mode (`long_page`, `profile_settings.length`) and, for each side, the READ counts (`reads`).
+- The long page mode is not verified on the scanner. Refer to section 9 and PROTOCOL.md, "Long page mode".
+
+With no paper in the chute and no sheet in the front slot, a press starts no job (`service.check_paper = true`). The scanner sends one event for each press. A long press works only with paper in the chute.
 
 The scanner always reads both sides. For a simplex profile, the service keeps the side with more print (ink ratio), so the paper can face up or down. `paper_face` is only the order of the pages (and the choice when the service cannot decode the JPEG). If the measurement of a side fails, the service does not know its print: that side stays in the PDF (with a warning), also when the other side is blank.
 
@@ -136,13 +149,14 @@ The scanner always reads both sides. For a simplex profile, the service keeps th
 - **OCR:** `ocr = true` makes a searchable PDF with tesseract (`ocr_lang`). For a rotated page, the service turns the pixels with `jpegtran` (or Pillow). If it cannot turn a page, it makes the normal PDF without a text layer.
 - **PDF:** without OCR, the service embeds the scanner JPEG bytes directly (no new encode). The page size comes from the DPI.
 - **Memory:** the service keeps only the JPEG bytes, one page decode at a time, at 75 dpi (blank test, paper size) and 150 dpi gray (rotation). `max_memory_mb` (default 64) is the JPEG data of all jobs together in memory (also the pages after crop and deskew). More data stays in files in `service.work_dir`. After the PDF, the service drops the JPEG data of the job, then gives back its memory. The PDF goes into a file and the outputs read it in parts. `workers` (default 1) is the number of threads for the page work. tesseract runs with one thread (`OMP_THREAD_LIMIT=1`) and a time limit (`tesseract_timeout`). Refer to section 4.5.
+- **Long pages** (longer than 900 mm, only in long page mode): a full decode of a 3,000 mm page needs much memory (2,592 x 35,433 pixels: 88 MB gray, 350 MB colour for each Pillow copy), and `jpegtran` keeps the full page in memory (measured: 256 MB gray, 383 MB colour). So the service first cuts a long page to the paper with `djpeg -crop | cjpeg` (one new JPEG encode, about 2 MB of memory). Then it straightens the narrower page with Pillow only if the estimate (3 copies of the decoded page) is not more than `max_decode_mb` (192 MB). A 3,000 mm gray receipt, 80 mm wide, needs about 96 MB. The same receipt in colour needs about 383 MB: the service does not straighten it, and `raw.json` shows `deskew_skipped`. The service sets the Pillow limit `MAX_IMAGE_PIXELS` to 120,000,000 pixels: the largest scanner page (600 dpi, 895 mm) has 110 million pixels, a 3,000 mm page at 300 dpi has 92 million. Pillow rejects images with more than 240 million pixels.
 - **Receipts:** a document is a receipt if paper length / paper width > `receipt_ratio` (2.0) on a page. The service measures the paper on the gray backing, not the 219 mm scan window. The paper width is the distance between the outer left and right paper edges (median of the rows, corrected for the skew). Print, shade and wrinkles in the paper do not make the paper narrower. The blank test uses the paper and print pixels only. Example: the 80 mm receipts in `scans/receipts` measure 78.6 to 79.2 mm on both sides. Without a decoder, the service uses the image size.
 
 ### 4.3 Outputs
 
 **Paperless-ngx** (`type = "paperless"`): `POST <url>/api/documents/post_document/` with `Authorization: Token <token>`. If the scan has a warning (for example a probable jam), the title gets `warning_title_suffix` (default " [scan warning]"). Fields: `document`, `title`, `created`, `tags` (`tags`, plus `receipt_tags` for receipts), `correspondent`, `document_type` (or `receipt_correspondent`, `receipt_document_type` for receipts). Use 0 for "not set".
 
-**Webhook** (`type = "webhook"`): multipart POST to `url`. The PDF is in the field `field` (default `file`). Other fields: `title`, `profile`, `pages`, `receipt`, `created`, `job_id`, `warnings`, and the values in `fields`. `headers` adds HTTP headers (for example a token).
+**Webhook** (`type = "webhook"`): multipart POST to `url`. The PDF is in the field `field` (default `file`). Other fields: `title`, `profile`, `pages`, `receipt`, `created`, `job_id`, `paper_path` (`top` for the chute, `front` for the front slot), `warnings`, and the values in `fields`. `headers` adds HTTP headers (for example a token).
 
 **Directory** (`type = "directory"`): writes the PDF into `path`. It never replaces a file: the second file gets the name `name-1.pdf`. On a file system without hard links (some network shares), the service makes the file with an exclusive create and then copies the PDF into it. Only a crash during this copy can leave a short file; the job then stays in `work_dir` and the service sends it again. New files get `file_mode` (default `"0600"`), new directories `dir_mode` (default `"0700"`). Use for example `file_mode = "0640"` if other users must read the files.
 
@@ -205,6 +219,8 @@ deskew = false
 ```
 
 Also set `IX1300_MEM_LIMIT` below the free RAM. Without OCR and deskew, the service decodes only small gray copies (75 and 150 dpi), and tesseract OSD (rotation) uses one thread.
+
+Long page mode on a small computer: the scan keeps about 2 x the JPEG size of the longest side in Python memory (measured with the emulator: 4.3 MB for a 3,000 mm receipt, 27 MB for a dense 3,000 mm colour page). The crop of a long page uses `djpeg` and `cjpeg` (a few MB). For deskew of long pages, set `pipeline.max_decode_mb` below the free RAM, or `deskew = false` in the receipt profile.
 
 ## 5. Jobs, recovery and delivery
 
@@ -277,7 +293,7 @@ python3 -m unittest discover -s service/tests
 ## 9. Not verified on the scanner
 
 - `color = "color"` and `color = "gray"` (only `auto` was tested). 150, 200 and 600 dpi.
-- `length` other than `auto`. Pages longer than 895 mm.
+- `length` in mm. The long page mode (`length = "long"`): all of PROTOCOL.md, "Long page mode" (the E9 and D4 values, the mutual READs, the residue of the last chunk, the JPEG height of a long page, the pixel size after a mutual read). The long page crop (`djpeg -crop | cjpeg`) was tested on the Mac with libjpeg-turbo 3.2 only. The Pillow memory figures for long pages are estimates (Pillow was not available on the test computer).
 - The stop during a scan (D8, E0, wait for an empty paper path, D6) was tested with the emulator only. The scanner behaviour after D8 was measured (PROTOCOL.md 8.6), but not the complete service sequence: the E0 reply after D8, the C2 sensor values during the eject, and the time to the empty path.
 - Error paths of a job: D6 after a lost D5 reply, a release and a new reserve after a failed D6.
 - The button packet is always exactly 48 bytes, and the scanner sends it from its own IP address.

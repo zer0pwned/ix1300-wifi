@@ -30,7 +30,24 @@ PFU_KEY = b"pFusCANsNapFiPfu"
 WINDOW_WIDTH = 0x2880        # 1/1200 inch (219.5 mm)
 AUTO_LENGTH = 0xA543         # 1/1200 inch (about 895 mm), automatic length
 PREREAD_LENGTH = 0x4350
+PATHS = ("top", "front")     # paper path: top chute (ADF) or front slot (return path)
+# Front slot (return path) job [HW]: E9 data length, D4 params byte 1 and byte 4.
+FRONT_PREREAD_LENGTH = 0x4410
+FRONT_D4_PATH = 0x06
+FRONT_D4_BYTE4 = 0x00
 READ_SIZE = 0x300000
+# Long page mode (ScanSnap Home paper code 0x8003; PROTOCOL.md "Long page mode"). Top chute only.
+# E9 data length 0x23680 (about 3,070 mm): DoSetPreReadMode 0x10017d940 [C].
+# D4 params byte 13 = 0x80: mutual transfer, SetWindow 0x10017e090; firmware flag 0x207f4 [C].
+# The window length stays 0xA543: DoSetWindowInfo 0x100156f00 [C].
+# READ size 0x20000 (MaxTransferSize_of_MutualRead): TelRead 0x3a834 [C].
+# The scanner side of these values is not verified on the hardware [NV].
+LONG_PREREAD_LENGTH = 0x23680
+LONG_D4_MUTUAL = 0x80
+MUTUAL_READ_SIZE = 0x20000
+IMAGE_PREFIX = 2             # page ID and sequence ID before the image data of a READ reply
+LONG_MAX_MM = 3000           # official limit of the long page mode
+LONG_DPI_VALUES = (150, 200, 300)   # 3,000 mm at 600 dpi needs more than 65,535 JPEG lines
 REPLY_SLACK = 64             # bytes that a reply can have more than the requested data-in length
 DPI_VALUES = (150, 200, 300, 600)
 
@@ -385,6 +402,23 @@ class HwStatus:
         return self._bit(2, 0x80)
 
     @property
+    def front_slot(self):
+        """True if a sheet is in the front slot: hopper empty AND feed sensor set [HW].
+
+        The exit sensor bit (byte 3 bit 0) can stay set with no paper (seen after
+        a halt), so this test does not use it."""
+        return self.hopper_empty and self.paper_at_feed
+
+    @property
+    def paper_path(self):
+        """"top" (paper in the hopper), "front" (paper in the front slot) or None (no paper).
+
+        Valid only before a job: during a job the scanner pulls sheets into the path."""
+        if not self.hopper_empty:
+            return "top"
+        return "front" if self.front_slot else None
+
+    @property
     def button_short(self):
         return self._bit(4, 0x01)
 
@@ -428,6 +462,11 @@ class Sense:
         return self.raw[13] if len(self.raw) > 13 else 0
 
     @property
+    def info(self):
+        """Information field (bytes 3-6, BE32). In a mutual READ: the residue of the last chunk."""
+        return int.from_bytes(self.raw[3:7], "big") if len(self.raw) >= 7 else 0
+
+    @property
     def temporary_no_data(self):
         return (self.key, self.asc, self.ascq) == (3, 0x80, 0x13)
 
@@ -446,23 +485,47 @@ class ScanSettings:
     dpi: int = 300
     color: str = "auto"              # auto, color, gray
     length: int = AUTO_LENGTH         # 1/1200 inch
+    path: str = "top"                 # "top" (chute) or "front" (front slot, return path)
+    long_page: bool = False           # long page mode: up to LONG_MAX_MM, mutual READs, top chute only
 
     def __post_init__(self):
+        if self.path not in PATHS:
+            raise ValueError("path must be top or front")
         if self.dpi not in DPI_VALUES:
             raise ValueError("dpi must be one of %s" % (DPI_VALUES,))
         if self.color not in ("auto", "color", "gray"):
             raise ValueError("color must be auto, color or gray")
         if not 0 < self.length <= AUTO_LENGTH:
             raise ValueError("length must be 1..%d (1/1200 inch)" % AUTO_LENGTH)
+        if self.long_page:
+            if self.path != "top":
+                raise ValueError("long page mode needs the top chute")
+            if self.dpi not in LONG_DPI_VALUES:
+                raise ValueError("long page mode needs dpi %s" % (LONG_DPI_VALUES,))
+            if self.length != AUTO_LENGTH:
+                raise ValueError("long page mode uses the automatic window length")
+
+    @property
+    def max_lines(self):
+        """The largest line count of one side: the E9 length in long page mode, else the window."""
+        return (LONG_PREREAD_LENGTH if self.long_page else self.length) * self.dpi // 1200
 
     def e9_data(self):
-        return struct.pack(">HHII", self.dpi, self.dpi, WINDOW_WIDTH, PREREAD_LENGTH) + b"\x05\x00" + bytes(18)
+        pre = FRONT_PREREAD_LENGTH if self.path == "front" else PREREAD_LENGTH
+        if self.long_page:
+            pre = LONG_PREREAD_LENGTH
+        return struct.pack(">HHII", self.dpi, self.dpi, WINDOW_WIDTH, pre) + b"\x05\x00" + bytes(18)
 
     def d4_data(self):
         params = bytearray([0x00, 0x03, 0x01, 0x01, 0x88, 0x00, 0xC1, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00])
         params += bytes(17) + b"\x30"
+        if self.path == "front":
+            params[1] = FRONT_D4_PATH         # front slot [HW]
+            params[4] = FRONT_D4_BYTE4
         if self.color != "auto":
             params[6] = 0x80             # fixed colour mode (not verified on hardware)
+        if self.long_page:
+            params[13] = LONG_D4_MUTUAL      # mutual transfer [NV]
         desc = bytearray(48)
         desc[1] = 0x10                   # JPEG
         struct.pack_into(">HH", desc, 2, self.dpi, self.dpi)
@@ -484,6 +547,7 @@ class Side:
     width: int = 0        # from the pixel size read
     lines: int = 0        # real line count from the pixel size read
     dpi: int = 300
+    read: dict = field(default_factory=dict)   # long page mode: READ counts and the last chunk (raw.json)
 
 
 @dataclass
@@ -723,6 +787,117 @@ class Scanner:
                 continue
             raise sense_error("READ", sense)
 
+    def _read_mutual(self, pages):
+        """Read the two sides of one sheet with mutual READs (long page mode).
+
+        PAGES: {window: page ID}. Return {window: (image bytearray, read info)}.
+        ScanSnap Home, getImageDataForMutualTransfer 0x241d4 [C]: in each step one
+        READ for window 0x00, then one READ for window 0x80, with one sequence ID
+        for the two. Each READ asks for MUTUAL_READ_SIZE bytes. A side ends with
+        CHECK CONDITION, sense key 0 and EOM (ILI is not examined). After that, only
+        the other side gets READs. The last chunk of a side has (MUTUAL_READ_SIZE - 2)
+        - (sense information) image bytes (0x24404-0x24478) [C]. If that cut removes
+        the JPEG end marker, all data stays (the scanner value is not verified [NV]).
+        Busy and "temporary no data" give the same READ again, as in _read_side.
+        An error sense gets the attribute "partial": True if image data came.
+        """
+        bufs = {w: bytearray() for w in pages}
+        info = {w: dict(mode="mutual", reads=0, chunks=0, bytes=0, eom_info=None, cut=0) for w in pages}
+        done = set()
+        seq = 0
+        start = last = time.monotonic()
+        body_max = MUTUAL_READ_SIZE - IMAGE_PREFIX
+        size = [(MUTUAL_READ_SIZE >> 16) & 0xFF, (MUTUAL_READ_SIZE >> 8) & 0xFF, MUTUAL_READ_SIZE & 0xFF]
+
+        def add(win, d, sense=None):
+            nonlocal last
+            page = pages[win]
+            if len(d) >= IMAGE_PREFIX and d[0] != page & 0xFF:
+                log.debug("READ window %02X: page ID %d in the reply, %d expected", win, d[0], page & 0xFF)
+            body = memoryview(d)[IMAGE_PREFIX:] if len(d) > IMAGE_PREFIX else memoryview(b"")
+            if sense is not None:
+                info[win]["eom_info"] = sense.info
+                valid = body_max - sense.info if sense.info <= body_max else 0
+                if valid < len(body):
+                    if bytes(body[-2:]) == b"\xff\xd9" and bytes(body[max(0, valid - 2):valid]) != b"\xff\xd9":
+                        log.warning("READ window %02X page %d: the residue %d would cut the JPEG end; "
+                                    "all %d bytes kept", win, page, sense.info, len(body))
+                    else:
+                        info[win]["cut"] = len(body) - valid
+                        body = body[:valid]
+            if len(bufs[win]) + len(body) > self.max_side_bytes:
+                raise ProtocolError("side larger than %d bytes" % self.max_side_bytes)
+            if len(body):
+                bufs[win].extend(body)
+                info[win]["chunks"] += 1
+                last = time.monotonic()
+
+        while len(done) < len(pages):
+            for win in sorted(pages):
+                if win in done:
+                    continue
+                page = pages[win]
+                while True:
+                    if self.abort is not None and self.abort():
+                        raise Stopped("READ window %02X page %d: stopped by the caller" % (win, page))
+                    now = time.monotonic()
+                    if now - last > self.data_timeout:
+                        raise ScanTimeout("mutual READ page %d: no data for %d s" % (page, self.data_timeout))
+                    if now - start > self.side_timeout:
+                        raise ScanTimeout("mutual READ page %d: sheet not complete in %d s" % (page,
+                                                                                               self.side_timeout))
+                    cdb = [0x28, 0, 0, 0, 0, win] + size + [0, page & 0xFF, seq & 0xFF]
+                    scsi, d = self.cmd(cdb, inlen=MUTUAL_READ_SIZE)
+                    info[win]["reads"] += 1
+                    if scsi == 8:                      # busy: send the same READ again
+                        time.sleep(0.05)
+                        continue
+                    if scsi == 0:
+                        add(win, d)
+                        break
+                    if scsi != 2:
+                        raise ProtocolError("READ: SCSI status %d" % scsi)
+                    sense = self.request_sense()
+                    if sense.temporary_no_data:        # drop the data, wait, same READ
+                        time.sleep(self.poll)
+                        continue
+                    if sense.key == 0 and sense.eom:   # end of this side; this reply has data
+                        add(win, d, sense)
+                        done.add(win)
+                        log.debug("READ window %02X page %d: end of side, %d bytes, %d READs (mutual), "
+                                  "EOM information %d, %d bytes cut", win, page, len(bufs[win]),
+                                  info[win]["reads"], sense.info, info[win]["cut"])
+                        break
+                    if sense.key == 0:                 # not an error: keep the data
+                        add(win, d)
+                        break
+                    err = sense_error("READ", sense)
+                    err.partial = bool(done) or any(len(b) for b in bufs.values())
+                    raise err
+            seq += 1
+        for win in pages:
+            info[win]["bytes"] = len(bufs[win])
+        return {win: (bufs[win], info[win]) for win in pages}
+
+    def _mutual_sheet(self, sheet, page, settings):
+        """Long page mode: read one sheet (two sides) with mutual READs. Return the list of 2 Side."""
+        pages = {0x00: page, 0x80: page + 1}
+        data = self._read_mutual(pages)
+        sides = []
+        for side, win in (("front", 0x00), ("back", 0x80)):
+            buf, rinfo = data.pop(win)
+            # ScanSnap Home reads the pixel size one time, for the last window [C]. This
+            # service reads it for each side, as in the normal flow [NV in long page mode].
+            width, lines = self._pixel_size(win, pages[win])
+            if lines:
+                jpeg.fix_height_in_place(buf, lines, max_lines=settings.max_lines)
+            rinfo.update(width=width, lines=lines)
+            img, buf = bytes(buf), None              # one copy: a long side can be large
+            sides.append(Side(sheet=sheet, side=side, page_id=pages[win] & 0xFF, jpeg=img, width=width,
+                              lines=lines, dpi=settings.dpi, read=rinfo))
+            img = None
+        return sides
+
     def _pixel_size(self, win, page):
         """Return (width, real lines) of the last side, or (0, 0)."""
         scsi, ps = self.cmd([0x28, 0, 0x80, 0, 0, win, 0, 0, 0x20, 0, page & 0xFF, 0], inlen=0x20)
@@ -836,6 +1011,9 @@ class Scanner:
         The caller must have a reserve.
         """
         result = ScanResult()
+        if settings.long_page:
+            log.info("long page mode: E9 length 0x%X, D4 byte 13 = 0x%02X, mutual READ of 0x%X bytes",
+                     LONG_PREREAD_LENGTH, LONG_D4_MUTUAL, MUTUAL_READ_SIZE)
         self._check("D8", [0xD8, 0, 0, 0, 0, 0])
         self._check("E9", [0xE9, 0, 0, 0, 0, 0, 0, 0x20, 0, 0], out=settings.e9_data())
         self._check("D4", [0xD4, 0, 0, 0, 0x50, 0], out=settings.d4_data())
@@ -870,16 +1048,19 @@ class Scanner:
                     break
                 sides = []
                 try:
-                    for side, win, pid in (("front", 0x00, page), ("back", 0x80, page + 1)):
-                        data = self._read_side(win, pid)
-                        width, lines = self._pixel_size(win, pid)
-                        if lines:
-                            data = jpeg.fix_height(data, lines)
-                        sides.append(Side(sheet=result.sheets, side=side, page_id=pid & 0xFF, jpeg=data,
-                                          width=width, lines=lines, dpi=settings.dpi))
-                        data = None
+                    if settings.long_page:
+                        sides = self._mutual_sheet(result.sheets, page, settings)
+                    else:
+                        for side, win, pid in (("front", 0x00, page), ("back", 0x80, page + 1)):
+                            data = self._read_side(win, pid)
+                            width, lines = self._pixel_size(win, pid)
+                            if lines:
+                                data = jpeg.fix_height(data, lines)
+                            sides.append(Side(sheet=result.sheets, side=side, page_id=pid & 0xFF, jpeg=data,
+                                              width=width, lines=lines, dpi=settings.dpi))
+                            data = None
                 except NoPaper as e:
-                    if sides:                             # no paper in the middle of a sheet: error
+                    if sides or getattr(e, "partial", False):   # no paper in the middle of a sheet: error
                         raise PaperLost(e.where, e.sense)
                     if result.sheets == 0:
                         raise
