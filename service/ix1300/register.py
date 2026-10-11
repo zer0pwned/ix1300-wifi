@@ -79,6 +79,17 @@ def check_result(op, reply):
         raise RegisterError("DC op %d: result 0x%02X (reply %s)" % (op, reply[0], reply.hex(" ")))
 
 
+def dc_data_id(data):
+    """Get the host ID from the DC op 1 data, or None.
+
+    [HW] The data is 24 bytes: byte 0 = 01, then 7 zero bytes, the ID at
+    bytes 8..15, and 8 zero bytes. Op 4 gives 00 18 00 00 (the data length).
+    """
+    if len(data) < 16 or data[0] != 1:
+        return None
+    return bytes(data[8:16])
+
+
 def registered_id(scanner):
     """The registered host ID (8 bytes) from C2, or None if no ID is registered."""
     try:
@@ -117,8 +128,10 @@ def show(scanner, dev=None, read_dc=True, say=log.info):
         say("mode-2 reserve: %s. DC op 4 and op 1 not read" % e)
         return reg
     try:
-        say("DC op 4 (length) [NV]: %s" % hostid_op(scanner, OP_GET_LEN, inlen=4).hex(" "))
-        say("DC op 1 (data) [NV]: %s" % hostid_op(scanner, OP_GET_DATA, bytes(2), inlen=0x18).hex(" "))
+        say("DC op 4 (length): %s" % hostid_op(scanner, OP_GET_LEN, inlen=4).hex(" "))
+        data = hostid_op(scanner, OP_GET_DATA, bytes(2), inlen=0x18)
+        say("DC op 1 (data): %s" % data.hex(" "))
+        say("registered host ID (DC op 1): %s" % fmt(dc_data_id(data)))
     except (OSError, IxError) as e:
         say("DC read failed: %s" % e)
     finally:

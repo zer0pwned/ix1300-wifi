@@ -137,7 +137,9 @@ class A10DeliveryTest(DeliveryCase):
         svc.start()
         jid = self.queue_job(svc)
         self.assertTrue(wait_for(lambda: bad.calls == 1 and len(good.docs) == 1, 15), "first attempts")
-        self.assertTrue(wait_for(lambda: self.manifest(J.JOBS, jid)["outputs"]["bad"].get("due")), "no due time")
+        # Each output saves its own state; wait for both before the checks.
+        self.assertTrue(wait_for(lambda: self.manifest(J.JOBS, jid)["outputs"]["bad"].get("due")
+                                 and self.manifest(J.JOBS, jid)["outputs"]["good"].get("ok")), "no due time")
         m = self.manifest(J.JOBS, jid)
         st = m["outputs"]["bad"]
         self.assertEqual(m["state"], "delivering")

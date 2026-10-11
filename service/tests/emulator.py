@@ -518,7 +518,8 @@ class Emulator:
         elif sub == 4:
             data = struct.pack(">HH", 0x18 if self.has_id() else 0, 0)
         elif sub == 1:
-            data = (self.registered_id if self.has_id() else bytes(8)) + bytes(16)
+            # [HW] 01, 7 zero bytes, the ID at bytes 8..15, 8 zero bytes
+            data = (b"\x01" + bytes(7) + self.registered_id + bytes(8)) if self.has_id() else bytes(24)
         else:
             res = 0x02
         if sub in (4, 1) and res == 0:

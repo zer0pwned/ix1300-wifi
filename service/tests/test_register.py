@@ -14,7 +14,7 @@ import support
 from emulator import NO_ID, REGISTERED_ID, Emulator
 from netsim import make_net
 from test_daemon import CONFIG, RecordOutput, make_service, wait_for
-from ix1300 import cli, config as C, protocol as P
+from ix1300 import cli, config as C, protocol as P, register
 
 NEW_ID = bytes.fromhex("FEDCBA9876543210")
 OTHER_ID = bytes.fromhex("1111222233334444")     # the ID of another computer (ScanSnap Home)
@@ -64,6 +64,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.emu.registered_id, OTHER_ID)
         self.assertEqual(self.dc_ops(), [4, 1])                  # read only
         self.assertIsNone(self.emu.owner)                       # released
+
+    def test_show_reads_id_from_dc_data(self):
+        # the DC op 1 reply that the real scanner gave (2026-10-11)
+        real = bytes.fromhex("01" + "00" * 7 + "18219D62ECE014DD" + "00" * 8)
+        self.emu.dc_override[1] = real
+        code, out, err = self.run_cli("--show")
+        self.assertEqual(code, 0, err)
+        self.assertIn("registered host ID (DC op 1): 18219D62ECE014DD", out)
+        self.assertEqual(register.dc_data_id(bytes(24)), None)
 
     def test_show_without_mode2(self):
         self.emu.registered_id = OTHER_ID
