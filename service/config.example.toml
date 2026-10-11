@@ -117,9 +117,12 @@ keep_raw_max_jobs = 20
 # Protocol trace: one JSON line for each message to and from the scanner, in this directory
 # (for example "/data/trace"). Empty: off. Image data is not in the trace (only its length and SHA-256).
 # A file larger than trace_max_mb becomes <name>.1, and a new file starts.
+# When a file starts, the oldest trace files (*.jsonl, *.jsonl.1) in trace_dir go
+# until all trace files together are not larger than trace_total_mb.
 trace_dir = ""
 trace_payload_bytes = 256
 trace_max_mb = 50
+trace_total_mb = 500
 
 [pipeline]
 # Blank page detection. "pixels" decodes a small gray copy (Pillow or the djpeg program).

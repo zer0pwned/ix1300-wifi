@@ -46,12 +46,15 @@ class Trace:
     KEEP: also keep all records in memory (self.records), for the self-test checks.
     MAX_BYTES: when the file is larger, it becomes PATH + ".1" (one old file) and a
     new file starts. 0 = no limit.
+    TOTAL_BYTES: when a file starts, the oldest trace files in its directory go away
+    until all trace files together are not larger (refer to prune()). 0 = no limit.
     """
 
-    def __init__(self, path=None, payload_bytes=DEFAULT_PAYLOAD_BYTES, keep=False, max_bytes=0):
+    def __init__(self, path=None, payload_bytes=DEFAULT_PAYLOAD_BYTES, keep=False, max_bytes=0, total_bytes=0):
         self.payload_bytes = max(0, int(payload_bytes))
         self.keep = keep
         self.max_bytes = int(max_bytes or 0)
+        self.total_bytes = int(total_bytes or 0)
         self.records = []
         self.hook = None             # a function: called with each new record (the self-test)
         self.lock = threading.Lock()
@@ -76,6 +79,7 @@ class Trace:
             self.path = path
             self.size = self.fh.tell()
             self.n = 0
+            self._prune()
 
     def _close(self):
         if self.fh is not None:
@@ -97,6 +101,11 @@ class Trace:
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         self.fh = os.fdopen(fd, "a", encoding="utf-8")
         self.size = 0
+        self._prune()
+
+    def _prune(self):
+        if self.total_bytes:
+            prune(os.path.dirname(self.path) or ".", self.total_bytes, keep=self.path)
 
     # --- Records ---
     def next_x(self):
@@ -158,6 +167,40 @@ class Trace:
             return list(self.records[mark:])
 
 
+def is_trace_file(name):
+    """True for the names of the trace files: <name>.jsonl and <name>.jsonl.1."""
+    return name.endswith(".jsonl") or name.endswith(".jsonl.1")
+
+
+def prune(d, total_bytes, keep=None):
+    """Remove the oldest trace files in directory D until the trace files together have at
+    most TOTAL_BYTES. Other files and the file KEEP stay. A trace problem never stops a scan."""
+    files = []
+    try:
+        for name in os.listdir(d):
+            fn = os.path.join(d, name)
+            if not is_trace_file(name) or (keep and os.path.abspath(fn) == os.path.abspath(keep)):
+                continue
+            try:
+                st = os.stat(fn)
+            except OSError:
+                continue
+            files.append((st.st_mtime, name, st.st_size, fn))
+        total = sum(f[2] for f in files)
+        if keep:
+            total += os.path.getsize(keep) if os.path.exists(keep) else 0
+    except OSError:
+        return
+    for _mtime, _name, size, fn in sorted(files):
+        if total <= total_bytes:
+            break
+        try:
+            os.remove(fn)
+            total -= size
+        except OSError:
+            pass
+
+
 def open_trace(cfg, name="service"):
     """A Trace into service.trace_dir/<NAME>-<time>.jsonl, or None if service.trace_dir is empty."""
     sv = cfg.service
@@ -167,7 +210,8 @@ def open_trace(cfg, name="service"):
     os.makedirs(d, mode=0o700, exist_ok=True)
     path = os.path.join(d, "%s-%s-%d.jsonl" % (name, time.strftime("%Y%m%d-%H%M%S"), os.getpid()))
     return Trace(path, payload_bytes=int(sv.get("trace_payload_bytes", DEFAULT_PAYLOAD_BYTES)),
-                 max_bytes=int(float(sv.get("trace_max_mb", 50)) * (1 << 20)))
+                 max_bytes=int(float(sv.get("trace_max_mb", 50)) * (1 << 20)),
+                 total_bytes=int(float(sv.get("trace_total_mb", 500)) * (1 << 20)))
 
 
 # --- Summaries for the tests and the self-test -------------------------------

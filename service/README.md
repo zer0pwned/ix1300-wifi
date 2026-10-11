@@ -612,7 +612,7 @@ output types:
 | `retries` | 2 | New attempts after a failure |
 | `retry_delay` | 5 | Seconds before the first new attempt (then 2 x, 4 x, ...) |
 | `timeout` | 60 (webhook), 120 (Paperless) | Seconds for each network operation |
-| `max_time` | 600 | Seconds for one full attempt |
+| `max_time` | 600 | Seconds for one full attempt: connection, upload and reply. A name look-up (DNS) can take longer |
 | `verify_tls` | `true` | Examine the HTTPS certificate |
 
 Each wait is between 50 % and 100 % of the calculated value, so that many
@@ -635,7 +635,11 @@ request has the job ID (the header `X-Ix1300-Job`, and the webhook field
 `job_id`), so that a receiver can find copies. Paperless can find duplicates by
 their checksum.
 
-The logs do not show tokens, header values, or the reply text.
+The logs do not show tokens, header values, or the reply text. For Paperless,
+the log and the job record keep only the task ID of the reply. For a webhook,
+the job record keeps the first 200 characters of the reply. The service
+removes the tokens and header values from the full reply before it cuts the
+text.
 
 ---
 
@@ -695,11 +699,16 @@ the scan:
 
 - If `work_dir` has less than `min_free_mb` (200 MB) free, the service does not
   start the scan.
-- If `max_backlog` (3) jobs wait for the PDF work, the service does not start
-  the scan.
+- If `max_backlog` (3) jobs wait for the PDF work or for their first
+  delivery, the service does not start the scan. Thus a slow output stops
+  new scans before too many documents wait in its queue.
 
 The paper then stays in the chute. Correct the cause, and push the button
-again. The documents in the output queues do not count for `max_backlog`.
+again. A scan that started always continues to the end.
+
+The jobs in `work_dir/unsent` do not count for `max_backlog`. At most
+`max_backlog` of them are in the output queues at the same time. The service
+puts the other jobs into the queues later.
 
 ### 7.5 Damaged jobs
 
@@ -921,7 +930,7 @@ Use the default image (with tesseract), or set `rotate = 180` in the profile.
 Make space in `work_dir` (for example old jobs in `failed`), or change
 `min_free_mb`. Push the button again.
 
-**`scan not started: N jobs wait for processing`**
+**`scan not started: N jobs wait for processing or delivery`**
 The PDF work or the outputs are slow. Wait, and push the button again. Change
 `max_backlog` if necessary.
 
@@ -1043,6 +1052,11 @@ trace_dir = "/data/trace"
   checksum, and its first and last 32 bytes.
 - A file larger than `trace_max_mb` (50) becomes `<name>.1`, and a new file
   starts.
+- When a file starts, the service removes the oldest trace files in the
+  folder until all trace files together are not larger than `trace_total_mb`
+  (500). Only the files `*.jsonl` and `*.jsonl.1` count. Other files in the
+  folder stay. The new file can then grow to `trace_max_mb` before the next
+  check.
 
 The script `tests/replay.py` reads a trace. It shows the command sequence of
 each job, and it can compare a trace with the emulator.
@@ -1185,7 +1199,7 @@ in sections 3.3 and 5. The comments in `config.example.toml` give more help.
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `deliver_partial` | `true` | Send the complete sheets before a scan error |
 | `min_free_mb` | 200 | No scan with less free space in `work_dir` (MB) |
-| `max_backlog` | 3 | No scan when this number of jobs waits for the PDF work |
+| `max_backlog` | 3 | No scan when this number of jobs waits for the PDF work or the first delivery |
 | `stop_timeout` | 60 | Seconds for a clean stop. Less than `stop_grace_period` |
 | `stop_scan_wait` | 15 | Seconds that a scan can continue at a stop. Less than `stop_timeout` |
 | `retry_interval` | 60 | First wait (s) before a new attempt for unsent jobs |
@@ -1196,6 +1210,7 @@ in sections 3.3 and 5. The comments in `config.example.toml` give more help.
 | `trace_dir` | empty | Folder for the protocol trace. Empty: off |
 | `trace_payload_bytes` | 256 | Longest data in a trace line (bytes) |
 | `trace_max_mb` | 50 | Size of a trace file before a new file starts |
+| `trace_total_mb` | 500 | Size of all trace files in `trace_dir`. The oldest files go first |
 
 ### 16.3 `[pipeline]`
 

@@ -560,9 +560,10 @@ class Service:
             log.error("scan not started: only %d MB free in %s (service.min_free_mb = %d). "
                       "Make space, then push the button again", free, self.work_dir, sv["min_free_mb"])
             return False
-        if self.backlog >= int(sv["max_backlog"]):
-            log.error("scan not started: %d jobs wait for processing (service.max_backlog = %d). "
-                      "Wait, then push the button again", self.backlog, sv["max_backlog"])
+        waiting = self.waiting_jobs()
+        if waiting >= int(sv["max_backlog"]):
+            log.error("scan not started: %d jobs wait for processing or delivery (service.max_backlog = %d). "
+                      "Wait, then push the button again", waiting, sv["max_backlog"])
             return False
         return True
 
@@ -918,8 +919,9 @@ class Service:
                     st.pop("error", None)
                     st.pop("permanent", None)
                     reply = getattr(out, "last_reply", None)
-                    if isinstance(reply, bytes) and reply and hasattr(out, "redact"):
-                        st["reply"] = out.redact(reply[:200].decode("utf-8", "replace").strip())
+                    text = outputs_mod.reply_text(out, reply) if isinstance(reply, bytes) and reply else None
+                    if text is not None:                # no secrets (Output.reply_text)
+                        st["reply"] = text
                 else:
                     st["error"] = getattr(out, "last_error", None) or "failed"
                     st["permanent"] = bool(getattr(out, "last_permanent", False))
@@ -952,6 +954,14 @@ class Service:
         if fn is not None:
             return float(fn(n, self.random))
         return outputs_mod.retry_wait(float(getattr(out, "retry_delay", 0) or 0), n, self.random)
+
+    def waiting_jobs(self):
+        """The jobs that wait for the PDF work or for the end of their first delivery (max_backlog).
+
+        A slow output thus stops new scans before too many documents wait in its queue."""
+        with self.delivery_cond:
+            sending = sum(1 for d in self.deliveries.values() if d.first)
+        return self.backlog + sending
 
     def _round_wait(self, attempts):
         """Seconds before the next round for an unsent job after ATTEMPTS earlier rounds (with jitter)."""
@@ -1005,8 +1015,9 @@ class Service:
                 for k in ("error", "permanent", "due", "round"):
                     st.pop(k, None)
                 reply = getattr(out, "last_reply", None)
-                if isinstance(reply, bytes) and reply and hasattr(out, "redact"):
-                    st["reply"] = out.redact(reply[:200].decode("utf-8", "replace").strip())
+                text = outputs_mod.reply_text(out, reply) if isinstance(reply, bytes) and reply else None
+                if text is not None:                # no secrets (Output.reply_text)
+                    st["reply"] = text
             else:
                 st["ok"] = False
                 st["error"] = getattr(out, "last_error", None) or "failed"
@@ -1073,7 +1084,8 @@ class Service:
         """Put the due jobs of work_dir/unsent into the output queues (only the due outputs).
 
         Not the outputs with a permanent error, and no job after retry_max_attempts.
-        Return the number of jobs put into the queues.
+        At most max_backlog unsent jobs are in the queues (each has an open job lock);
+        the next examination puts the other jobs in. Return the number of jobs put into the queues.
         """
         sv = self.cfg.service
         n = 0
@@ -1083,6 +1095,8 @@ class Service:
             with self.delivery_cond:
                 if jd.id in self.deliveries:
                     continue
+                if sum(1 for d in self.deliveries.values() if not d.first) >= int(sv["max_backlog"]):
+                    break
             if not jd.claim():
                 continue
             handed = False
