@@ -40,10 +40,7 @@ Each item needs the scanner and some paper.
 
 ## For the owner of the repository
 
-1. Remove the old agent worktrees:
-   `git worktree prune`, then `git branch -D` for each `worktree-agent-*`
-   branch.
-2. Make the GitHub repository public when you are ready.
+1. Make the GitHub repository public when you are ready.
 
 ## Not planned
 
