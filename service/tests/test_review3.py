@@ -3,8 +3,10 @@
 A: the documents in the output queues count for max_backlog, and unsent jobs
    go into the output queues only while the queues have space.
 B: the attempt deadline (max_time) also applies to the connection setup.
+C: the service removes secrets from the full reply before it cuts the text.
 """
 import http.client
+import logging
 import socket
 import time
 import unittest
@@ -12,8 +14,11 @@ import unittest
 import support  # noqa: F401
 import test_delivery
 from test_daemon import wait_for
-from test_delivery import DeliveryCase, Gate
+from test_delivery import DeliveryCase, Failing, Gate
 from ix1300 import jobs as J, outputs as O
+from ix1300.pipeline import Document
+
+SECRET = "SECRETVALUE123"
 
 
 class AdmissionTest(DeliveryCase):
@@ -94,6 +99,52 @@ class DeadlineTest(unittest.TestCase):
         self.assertLess(elapsed, 3.0)
         self.assertIn("no complete reply", error)
         self.assertTrue(data.startswith(b"POST / HTTP/1.1"))
+
+
+def doc():
+    return Document("scan-1.pdf", "Scan 1", "default", 1, False, created=0, warnings=[], pdf=b"%PDF-1.4\n%%EOF\n")
+
+
+class EchoHook(O.WebhookOutput):
+    """A webhook whose receiver sends the secret header back after 195 bytes."""
+
+    def send(self, doc):
+        return b"x" * 195 + SECRET.encode()
+
+
+class EchoPaperless(O.PaperlessOutput):
+    def __init__(self, reply):
+        super().__init__("pl", {"url": "http://paperless.invalid", "token": SECRET})
+        self.reply = reply
+
+    def _post(self, url, body, headers, default_timeout):
+        return 200, self.reply
+
+
+class RedactTest(DeliveryCase):
+    def test_manifest_reply_has_no_secret_prefix(self):
+        cfg = self.config()
+        hook = EchoHook("hook", {"url": "http://hook.invalid/", "headers": {"X-Key": SECRET}})
+        bad = Failing(permanent=True)                    # the job stays in unsent with its manifest
+        svc = self.service(cfg, {"hook": hook, "bad": bad})
+        svc.start()
+        jid = self.queue_job(svc)
+        self.assertTrue(wait_for(lambda: self.ls(J.UNSENT) == [jid], 15))
+        reply = self.manifest(J.UNSENT, jid)["outputs"]["hook"]["reply"]
+        self.assertTrue(reply.startswith("xxx"))
+        self.assertNotIn(SECRET[:4], reply)
+
+    def test_paperless_log_has_only_the_task_id(self):
+        out = EchoPaperless(b'{"detail": "' + b"x" * 64 + SECRET.encode() + b'"}')
+        with self.assertLogs("ix1300.outputs", logging.INFO) as cm:
+            self.assertTrue(out.attempt(doc()))
+        self.assertNotIn(SECRET[:4], "\n".join(cm.output))
+        self.assertEqual(O.reply_text(out, out.last_reply), "(no task ID in the reply)")
+        out = EchoPaperless(b'"6f1c0f8e-1b2c-4d5e-8f90-0a1b2c3d4e5f"')
+        with self.assertLogs("ix1300.outputs", logging.INFO) as cm:
+            self.assertTrue(out.attempt(doc()))
+        self.assertIn("paperless task 6f1c0f8e-1b2c-4d5e-8f90-0a1b2c3d4e5f", "\n".join(cm.output))
+        self.assertEqual(O.reply_text(out, out.last_reply), "6f1c0f8e-1b2c-4d5e-8f90-0a1b2c3d4e5f")
 
 
 if __name__ == "__main__":

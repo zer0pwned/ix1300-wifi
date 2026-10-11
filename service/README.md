@@ -634,7 +634,11 @@ request has the job ID (the header `X-Ix1300-Job`, and the webhook field
 `job_id`), so that a receiver can find copies. Paperless can find duplicates by
 their checksum.
 
-The logs do not show tokens, header values, or the reply text.
+The logs do not show tokens, header values, or the reply text. For Paperless,
+the log and the job record keep only the task ID of the reply. For a webhook,
+the job record keeps the first 200 characters of the reply. The service
+removes the tokens and header values from the full reply before it cuts the
+text.
 
 ---
 

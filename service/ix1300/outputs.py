@@ -59,6 +59,7 @@ class Body:
 
 
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
+_TASK_ID = re.compile(r"[0-9A-Za-z-]{1,64}\Z")
 
 
 def _quote(value):
@@ -270,12 +271,18 @@ class Output:
         """Text that must not go into the logs."""
         return []
 
-    def redact(self, text):
+    def redact(self, text, limit=300):
+        """TEXT with no secrets, at most LIMIT characters. The cut comes after the replacement,
+        so that no part of a secret stays at the end."""
         text = _CTRL.sub(" ", str(text))
         for s in self.secrets():
             if s and len(str(s)) >= 3:
                 text = text.replace(str(s), "***")
-        return text[:300]
+        return text[:limit]
+
+    def reply_text(self, reply):
+        """The reply of the receiver for the manifest: no secrets, at most 200 characters."""
+        return self.redact(bytes(reply).decode("utf-8", "replace").strip(), 200)
 
     def _post(self, url, body, headers, default_timeout):
         return http_post(url, body, headers, float(self.cfg.get("timeout", default_timeout)),
@@ -327,6 +334,16 @@ def retry_wait(delay, n, rand=random.random):
     """DELAY x 2^(N-1) x (0.5 ... 1.0): exponential backoff with jitter (RAND gives 0 ... 1)."""
     base = float(delay) * 2 ** max(0, n - 1)
     return base * (0.5 + 0.5 * rand())
+
+
+def reply_text(out, reply):
+    """The text of REPLY (bytes) of OUT for the manifest, or None if OUT cannot remove its secrets."""
+    fn = getattr(out, "reply_text", None)
+    if fn is not None:
+        return fn(reply)
+    if hasattr(out, "redact"):
+        return out.redact(bytes(reply).decode("utf-8", "replace").strip())[:200]
+    return None
 
 
 def attempt(out, doc):
@@ -474,6 +491,18 @@ class PaperlessOutput(Output):
     def token(self):
         return self.cfg.get("token") or os.environ.get("PAPERLESS_TOKEN", "")
 
+    def reply_text(self, reply):
+        """Only the task ID of the reply (a JSON string, or "task_id" in an object)."""
+        try:
+            v = json.loads(bytes(reply).decode("utf-8"))
+        except ValueError:
+            v = None
+        if isinstance(v, dict):
+            v = v.get("task_id")
+        if isinstance(v, str) and _TASK_ID.match(v):
+            return v
+        return "(no task ID in the reply)"
+
     def secrets(self):
         u = urlsplit(self.cfg.get("url") or "")
         return [self.token(), u.password, u.username, u.query]
@@ -510,7 +539,7 @@ class PaperlessOutput(Output):
         status, resp = self._post(base + "/api/documents/post_document/", body, headers, 120)
         if not 200 <= status < 300:
             raise _status_error(status)
-        log.info("paperless task %s", self.redact(resp[:80].decode("utf-8", "replace").strip()))
+        log.info("paperless task %s", self.reply_text(resp))
         return resp
 
 

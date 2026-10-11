@@ -919,8 +919,9 @@ class Service:
                     st.pop("error", None)
                     st.pop("permanent", None)
                     reply = getattr(out, "last_reply", None)
-                    if isinstance(reply, bytes) and reply and hasattr(out, "redact"):
-                        st["reply"] = out.redact(reply[:200].decode("utf-8", "replace").strip())
+                    text = outputs_mod.reply_text(out, reply) if isinstance(reply, bytes) and reply else None
+                    if text is not None:                # no secrets (Output.reply_text)
+                        st["reply"] = text
                 else:
                     st["error"] = getattr(out, "last_error", None) or "failed"
                     st["permanent"] = bool(getattr(out, "last_permanent", False))
@@ -1014,8 +1015,9 @@ class Service:
                 for k in ("error", "permanent", "due", "round"):
                     st.pop(k, None)
                 reply = getattr(out, "last_reply", None)
-                if isinstance(reply, bytes) and reply and hasattr(out, "redact"):
-                    st["reply"] = out.redact(reply[:200].decode("utf-8", "replace").strip())
+                text = outputs_mod.reply_text(out, reply) if isinstance(reply, bytes) and reply else None
+                if text is not None:                # no secrets (Output.reply_text)
+                    st["reply"] = text
             else:
                 st["ok"] = False
                 st["error"] = getattr(out, "last_error", None) or "failed"
