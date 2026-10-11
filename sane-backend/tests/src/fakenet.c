@@ -9,6 +9,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
 
 #include "fakenet.h"
 
@@ -892,6 +893,16 @@ h_ioctl (int fd, unsigned long req, void *arg)
       inet_aton (FK_HOST_IP, &in->sin_addr);
       return 0;
     }
+#ifdef SIOCGIFHWADDR
+  if (req == SIOCGIFHWADDR)     /* Linux only: the MAC of the interface */
+    {
+      static const unsigned char mac[6] = { 0x02, 0, 0, 0, 0, 0x01 };
+
+      memset (&ifr->ifr_hwaddr, 0, sizeof (ifr->ifr_hwaddr));
+      memcpy (ifr->ifr_hwaddr.sa_data, mac, sizeof (mac));
+      return 0;
+    }
+#endif
   errno = EINVAL;
   return -1;
 }
