@@ -449,8 +449,12 @@ class WebhookOutput(Output):
     idempotency_header (for example "Idempotency-Key") adds a key to each request. The key
     is the same for each attempt of a document: "sha256" (the hex SHA-256 of the PDF) or
     "job_id" (the job ID).
+
+    standard_fields = false sends only the PDF and the configured fields (for receivers
+    that refuse unknown form fields, or that limit the number of parts).
     """
-    KEYS = Output.KEYS | {"url", "field", "headers", "fields", "idempotency_header", "idempotency_value"}
+    KEYS = Output.KEYS | {"url", "field", "headers", "fields", "idempotency_header", "idempotency_value",
+                          "standard_fields"}
     IDEMPOTENCY_VALUES = ("sha256", "job_id")
     RESERVED = ("content-type", "content-length", "host", "transfer-encoding", "user-agent", "x-ix1300-job")
 
@@ -462,6 +466,8 @@ class WebhookOutput(Output):
         _text_map(cfg, "fields")
         if _CTRL.search(str(cfg.get("field", "file"))):
             raise ValueError("field: control character")
+        if not isinstance(cfg.get("standard_fields", True), bool):
+            raise ValueError("standard_fields must be true or false")
         name = cfg.get("idempotency_header", "")
         if not isinstance(name, str):
             raise ValueError("idempotency_header must be a text")
@@ -495,16 +501,18 @@ class WebhookOutput(Output):
         url = self.cfg.get("url")
         if not url:
             raise OutputError("webhook url not set", permanent=True)
-        fields = [("title", doc.title), ("profile", doc.profile), ("pages", doc.pages),
-                  ("receipt", "true" if doc.receipt else "false"),
-                  ("created", time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(doc.created)))]
-        if getattr(doc, "job_id", None):
-            fields.append(("job_id", doc.job_id))
-        fields.append(("paper_path", getattr(doc, "paper_path", None) or "top"))
-        if getattr(doc, "parts", None):              # continue scanning: more than one part
-            fields.append(("parts", json.dumps(doc.parts)))
-        if doc.warnings:
-            fields.append(("warnings", json.dumps(doc.warnings)))
+        fields = []
+        if self.cfg.get("standard_fields", True):
+            fields = [("title", doc.title), ("profile", doc.profile), ("pages", doc.pages),
+                      ("receipt", "true" if doc.receipt else "false"),
+                      ("created", time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(doc.created)))]
+            if getattr(doc, "job_id", None):
+                fields.append(("job_id", doc.job_id))
+            fields.append(("paper_path", getattr(doc, "paper_path", None) or "top"))
+            if getattr(doc, "parts", None):          # continue scanning: more than one part
+                fields.append(("parts", json.dumps(doc.parts)))
+            if doc.warnings:
+                fields.append(("warnings", json.dumps(doc.warnings)))
         for k, v in (self.cfg.get("fields") or {}).items():
             fields.append((k, v))
         body, ctype = multipart(fields, [(self.cfg.get("field", "file"), doc.filename, "application/pdf", doc)])

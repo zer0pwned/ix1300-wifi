@@ -363,7 +363,7 @@ def _merge(base, extra):
 # Types of the keys that are not in DEFAULTS (profiles and outputs). Other keys are text.
 PROFILE_TYPES = {"dpi": int, "duplex": bool, "blank_skip": bool, "deskew": bool, "ocr": bool,
                  "double_feed": bool, "outputs": list, "crop": "text", "rotate": "text", "length": "text"}
-OUTPUT_TYPES = {"retries": int, "retry_delay": float, "timeout": float, "max_time": float, "verify_tls": bool,
+OUTPUT_TYPES = {"retries": int, "retry_delay": float, "timeout": float, "max_time": float, "verify_tls": bool, "standard_fields": bool,
                 "tags": list, "receipt_tags": list, "correspondent": int, "receipt_correspondent": int,
                 "document_type": int, "receipt_document_type": int, "headers": dict, "fields": dict}
 

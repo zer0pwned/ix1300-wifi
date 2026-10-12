@@ -196,6 +196,8 @@ fields = { source = "ix1300" }
 # "job_id": the job ID. Do not put the same header name in headers.
 # idempotency_header = "Idempotency-Key"
 # idempotency_value = "sha256"   # or "job_id"
+# false: send only the PDF and "fields" (no title, profile, pages, ... fields).
+# standard_fields = true
 
 [outputs.local]
 type = "directory"

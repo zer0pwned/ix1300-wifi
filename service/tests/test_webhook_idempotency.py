@@ -79,6 +79,27 @@ class IdempotencyKeyTest(unittest.TestCase):
             names = [k.lower() for k in srv.rec.requests[0]["headers"]]
         self.assertNotIn("idempotency-key", names)
 
+    def test_standard_fields_off_sends_only_the_pdf_and_fields(self):
+        with FakeServer() as srv:
+            self.assertTrue(hook(srv.url, standard_fields=False, fields={"source": "scanner"}).attempt(doc()))
+            names = [p[0] for p in parse_multipart(srv.rec.requests[0])]
+            headers = {k.lower() for k in srv.rec.requests[0]["headers"]}
+        self.assertEqual(names, ["source", "file"])        # the same parts as the curl example of Reflow
+        self.assertIn("x-ix1300-job", headers)
+
+    def test_standard_fields_on_by_default(self):
+        with FakeServer() as srv:
+            self.assertTrue(hook(srv.url).attempt(doc()))
+            names = [p[0] for p in parse_multipart(srv.rec.requests[0])]
+        self.assertIn("title", names)
+        self.assertIn("job_id", names)
+        with self.assertRaises(ValueError):
+            O.validate("hook", {"type": "webhook", "url": "http://hook.invalid/", "standard_fields": "no"})
+        cfg = C.load(text='[outputs.hook]\ntype = "webhook"\nurl = "http://hook.invalid/"\n'
+                          '[profiles.default]\noutputs = ["hook"]\n',
+                     env={"IX1300_OUTPUTS__HOOK__STANDARD_FIELDS": "false"})
+        self.assertIs(cfg.data["outputs"]["hook"]["standard_fields"], False)
+
     def test_bad_configuration_is_rejected(self):
         good = {"type": "webhook", "url": "http://hook.invalid/"}
         O.validate("hook", dict(good, idempotency_header="Idempotency-Key", idempotency_value="job_id"))
