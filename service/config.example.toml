@@ -170,7 +170,7 @@ filename_format = "scan-%Y%m%d-%H%M%S.pdf"
 # timeout (s for each network operation),
 # max_time (600 s for one attempt), verify_tls (true).
 # Delivery is "at least once": after a lost reply, a receiver can get a document two times.
-# Each request has the job ID (header X-Ix1300-Job; webhook field job_id).
+# Each request has the job ID in the header X-Ix1300-Job.
 
 [outputs.paperless]
 type = "paperless"
@@ -196,8 +196,9 @@ fields = { source = "ix1300" }
 # "job_id": the job ID. Do not put the same header name in headers.
 # idempotency_header = "Idempotency-Key"
 # idempotency_value = "sha256"   # or "job_id"
-# false: send only the PDF and "fields" (no title, profile, pages, ... fields).
-# standard_fields = true
+# true: also send the fields title, profile, pages, receipt, created, job_id and
+# paper_path. false (default): only the PDF and "fields".
+# standard_fields = false
 
 [outputs.local]
 type = "directory"

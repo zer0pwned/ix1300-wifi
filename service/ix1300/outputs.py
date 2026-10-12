@@ -466,7 +466,7 @@ class WebhookOutput(Output):
         _text_map(cfg, "fields")
         if _CTRL.search(str(cfg.get("field", "file"))):
             raise ValueError("field: control character")
-        if not isinstance(cfg.get("standard_fields", True), bool):
+        if not isinstance(cfg.get("standard_fields", False), bool):
             raise ValueError("standard_fields must be true or false")
         name = cfg.get("idempotency_header", "")
         if not isinstance(name, str):
@@ -502,7 +502,7 @@ class WebhookOutput(Output):
         if not url:
             raise OutputError("webhook url not set", permanent=True)
         fields = []
-        if self.cfg.get("standard_fields", True):
+        if self.cfg.get("standard_fields", False):
             fields = [("title", doc.title), ("profile", doc.profile), ("pages", doc.pages),
                       ("receipt", "true" if doc.receipt else "false"),
                       ("created", time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(doc.created)))]

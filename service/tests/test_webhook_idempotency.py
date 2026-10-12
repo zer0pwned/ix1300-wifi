@@ -87,18 +87,21 @@ class IdempotencyKeyTest(unittest.TestCase):
         self.assertEqual(names, ["source", "file"])        # the same parts as the curl example of Reflow
         self.assertIn("x-ix1300-job", headers)
 
-    def test_standard_fields_on_by_default(self):
+    def test_standard_fields_off_by_default(self):
         with FakeServer() as srv:
             self.assertTrue(hook(srv.url).attempt(doc()))
-            names = [p[0] for p in parse_multipart(srv.rec.requests[0])]
-        self.assertIn("title", names)
-        self.assertIn("job_id", names)
+            self.assertTrue(hook(srv.url, standard_fields=True).attempt(doc()))
+            default = [p[0] for p in parse_multipart(srv.rec.requests[0])]
+            on = [p[0] for p in parse_multipart(srv.rec.requests[1])]
+        self.assertEqual(default, ["file"])
+        self.assertIn("title", on)
+        self.assertIn("job_id", on)
         with self.assertRaises(ValueError):
             O.validate("hook", {"type": "webhook", "url": "http://hook.invalid/", "standard_fields": "no"})
         cfg = C.load(text='[outputs.hook]\ntype = "webhook"\nurl = "http://hook.invalid/"\n'
                           '[profiles.default]\noutputs = ["hook"]\n',
-                     env={"IX1300_OUTPUTS__HOOK__STANDARD_FIELDS": "false"})
-        self.assertIs(cfg.data["outputs"]["hook"]["standard_fields"], False)
+                     env={"IX1300_OUTPUTS__HOOK__STANDARD_FIELDS": "true"})
+        self.assertIs(cfg.data["outputs"]["hook"]["standard_fields"], True)
 
     def test_bad_configuration_is_rejected(self):
         good = {"type": "webhook", "url": "http://hook.invalid/"}

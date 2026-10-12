@@ -212,7 +212,7 @@ class FrontWebhookTest(unittest.TestCase):
         self.assertEqual(d.paper_path, "top")
         d.paper_path = "front"
         with FakeServer() as srv:
-            self.assertTrue(O.WebhookOutput("hook", {"url": srv.url}).deliver(d))
+            self.assertTrue(O.WebhookOutput("hook", {"url": srv.url, "standard_fields": True}).deliver(d))
             parts = {p[0]: p for p in parse_multipart(srv.rec.requests[0])}
         self.assertEqual(parts["paper_path"][3], b"front")
 

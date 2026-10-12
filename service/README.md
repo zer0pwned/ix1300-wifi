@@ -570,11 +570,18 @@ headers = { Authorization = "Bearer change-me" }
 fields = { source = "ix1300" }
 # idempotency_header = "Idempotency-Key"         # "" (default): no idempotency key
 # idempotency_value = "sha256"                   # or "job_id"
-# standard_fields = true                         # false: only the PDF and "fields"
+# standard_fields = false                        # true: also title, profile, pages, ...
 ```
 
 The service sends a multipart POST request to `url`. The PDF is in the field
-`field`. The request also has these fields:
+`field`. The values in `fields` are added to the request, and `headers` adds
+HTTP headers, for example a token. The service also sends the job ID in the
+header `X-Ix1300-Job`.
+
+By default, the request has no other fields. Many receivers (for example
+Reflow) refuse form fields that they do not know. With
+`standard_fields = true`, the request also has these fields, for a receiver
+that sorts or names the documents without a look into the PDF:
 
 | Field | Value |
 |---|---|
@@ -588,13 +595,6 @@ The service sends a multipart POST request to `url`. The PDF is in the field
 | `parts` | Continue scanning, two or more parts only (JSON) |
 | `warnings` | Only if the scan has warnings (JSON list) |
 
-The values in `fields` are added to the request. `headers` adds HTTP headers,
-for example a token.
-
-Some receivers refuse form fields that they do not know, or they limit the
-number of parts in a request. With `standard_fields = false`, the request has
-only the PDF and the values in `fields`. The service still sends the job ID in
-the header `X-Ix1300-Job`.
 
 Some receivers need an idempotency key in each upload (for example the header
 `Idempotency-Key`). Set `idempotency_header` to the name of that header. The

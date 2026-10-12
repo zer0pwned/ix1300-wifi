@@ -335,7 +335,7 @@ class OutputSafetyTest(unittest.TestCase):
 
     def test_multipart_quoting(self):
         with FakeServer() as srv:
-            out = O.WebhookOutput("hook", {"url": srv.url, "fields": {'we"ird': "a"}})
+            out = O.WebhookOutput("hook", {"url": srv.url, "fields": {'we"ird': "a"}, "standard_fields": True})
             self.assertTrue(out.deliver(doc('report"xé.pdf')))
             parts = parse_multipart(srv.rec.requests[0])
         names = [p[0] for p in parts]

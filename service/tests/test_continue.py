@@ -253,9 +253,9 @@ class ContinueWebhookTest(unittest.TestCase):
     def test_parts_field(self):
         d = Document("scan-1.pdf", "Scan 1", "default", 2, False, created=0, pdf=b"%PDF-1.4\n%%EOF\n")
         with FakeServer() as srv:
-            self.assertTrue(O.WebhookOutput("hook", {"url": srv.url}).deliver(d))
+            self.assertTrue(O.WebhookOutput("hook", {"url": srv.url, "standard_fields": True}).deliver(d))
             d.parts = [dict(part=1, sheets=1, paper_path="top"), dict(part=2, sheets=1, paper_path="front")]
-            self.assertTrue(O.WebhookOutput("hook", {"url": srv.url}).deliver(d))
+            self.assertTrue(O.WebhookOutput("hook", {"url": srv.url, "standard_fields": True}).deliver(d))
             first = {p[0] for p in parse_multipart(srv.rec.requests[0])}
             second = {p[0]: p for p in parse_multipart(srv.rec.requests[1])}
         self.assertNotIn("parts", first)

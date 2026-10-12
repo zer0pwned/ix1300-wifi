@@ -19,7 +19,8 @@ class WebhookTest(unittest.TestCase):
     def test_upload(self):
         with FakeServer() as srv:
             out = O.WebhookOutput("hook", {"url": srv.url + "/hook?x=1", "field": "upload",
-                                           "headers": {"X-Api-Key": "k1"}, "fields": {"source": "ix1300"}})
+                                           "headers": {"X-Api-Key": "k1"}, "fields": {"source": "ix1300"},
+                                           "standard_fields": True})
             self.assertTrue(out.deliver(doc()))
             req = srv.rec.requests[0]
         self.assertEqual(req["path"], "/hook?x=1")
