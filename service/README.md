@@ -535,6 +535,7 @@ type = "directory"
 path = "/data/out"          # data/out on the host
 # file_mode = "0640"        # default "0600"
 # dir_mode = "0750"         # default "0700"
+# keep = "until_sent"       # default "always"
 ```
 
 The service writes the PDF into `path`. It never replaces a file: a second file
@@ -545,6 +546,18 @@ the files.
 On a network share without hard links, the service makes the file and then
 copies the PDF into it. Only a crash during the copy can leave a short file.
 The job then stays on disk, and the service sends it again.
+
+With `keep = "until_sent"`, the folder has a local copy only until the upload
+is complete. When all other outputs of the job have the document, the service
+deletes the file. If an output fails, the file stays until a retry is
+successful. If the job goes to `unsent` and gets no more retries, the file
+stays. The default `keep = "always"` keeps all files.
+
+The service deletes only the file that it wrote for the job. The manifest
+has the path, the size and the inode of the file. If you move, delete or change
+the file, the service does not delete it, and it logs no error. If the profile
+of the job has no other output, the file stays. The service then logs a warning
+at the start.
 
 ### 6.2 Webhook (`type = "webhook"`)
 
@@ -1246,7 +1259,7 @@ Refer to section 5.1.
 | Type | Keys |
 |---|---|
 | All | `type`, `retries`, `retry_delay`, `timeout`, `max_time`, `verify_tls` (section 6.4) |
-| `directory` | `path`, `file_mode`, `dir_mode` (section 6.1) |
+| `directory` | `path`, `file_mode`, `dir_mode`, `keep` (`always` or `until_sent`) (section 6.1) |
 | `webhook` | `url`, `field`, `headers`, `fields` (section 6.2) |
 | `paperless` | `url`, `token`, `tags`, `receipt_tags`, `correspondent`, `receipt_correspondent`, `document_type`, `receipt_document_type`, `warning_title_suffix` (section 6.3) |
 

@@ -694,6 +694,13 @@ class Config:
                 outputs_mod.validate(name, out)
             except (TypeError, ValueError) as e:
                 raise ConfigError("output %s: %s" % (name, e))
+        for prof in self.profiles.values():
+            names = prof.outputs or list(self.outputs)
+            for name in names:
+                out = self.outputs[name]
+                if out.get("type") == "directory" and out.get("keep") == "until_sent" and len(names) < 2:
+                    log.warning("profile %s: output %s: keep = until_sent has no effect without other outputs "
+                                "(the file stays)", prof.name, name)
 
     @property
     def host_id(self):

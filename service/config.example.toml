@@ -198,6 +198,9 @@ path = "/data/out"
 # Mode of the new files and directories (default "0600" and "0700": only the service user).
 # file_mode = "0640"
 # dir_mode = "0750"
+# "always" (default): the file stays. "until_sent": the service deletes the file when all
+# other outputs of the job have the document. If an output fails, the file stays as a copy.
+# keep = "until_sent"         # or IX1300_OUTPUTS__LOCAL__KEEP
 
 # Profiles. The values in comments are the default values.
 # A button press always scans the whole stack. Load only the sheets that you want to scan.

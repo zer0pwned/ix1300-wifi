@@ -918,6 +918,7 @@ class Service:
                 if ok:
                     st.pop("error", None)
                     st.pop("permanent", None)
+                    _note_file(st, out)
                     reply = getattr(out, "last_reply", None)
                     text = outputs_mod.reply_text(out, reply) if isinstance(reply, bytes) and reply else None
                     if text is not None:                # no secrets (Output.reply_text)
@@ -1014,6 +1015,7 @@ class Service:
                 st["ok"] = True
                 for k in ("error", "permanent", "due", "round"):
                     st.pop(k, None)
+                _note_file(st, out)
                 reply = getattr(out, "last_reply", None)
                 text = outputs_mod.reply_text(out, reply) if isinstance(reply, bytes) and reply else None
                 if text is not None:                # no secrets (Output.reply_text)
@@ -1142,6 +1144,7 @@ class Service:
             self._settle_failed(jd)
             return
         if (jd.m["outputs"] or jd.m.get("saved")) and not jd.pending():
+            self._remove_copies(jd)
             if reason:
                 jd.m["state"] = "sent with missing pages" if jd.m.get("missing") else "sent, originals kept"
                 jd.m["error"] = reason
@@ -1158,6 +1161,22 @@ class Service:
         path = jd.move(UNSENT)
         log.warning("PDF kept in %s (outputs not done: %s). The service tries again; or use \"ix1300 retry\"",
                     path, ", ".join(jd.pending()) or "none")
+
+    def _remove_copies(self, jd):
+        """All outputs of JD have the document: delete the files of the directory outputs
+        with keep = "until_sent". If the job has no other output, the file stays."""
+        outs = jd.m["outputs"]
+        if len(outs) < 2:
+            return
+        for name, st in outs.items():
+            out = self.outputs.get(name)
+            if not st.get("file") or st.get("file_removed") or getattr(out, "keep", "always") != "until_sent":
+                continue
+            try:
+                if out.remove_copy(st["file"], jd.id):
+                    st["file_removed"] = True
+            except Exception:                    # the job must settle
+                log.exception("output %s: job %s: cannot delete the local copy", name, jd.id)
 
     def _settle_failed(self, jd):
         if not str(jd.m.get("state", "")).startswith("sent"):
@@ -1311,6 +1330,14 @@ class Service:
             log.error("job %s: %s", jd.id, msg)
         job.failures.extend(damaged)
         return job
+
+
+def _note_file(st, out):
+    """Save the file that OUT wrote (a directory output) in the output state ST of the manifest."""
+    rec = getattr(out, "last_file", None)
+    if isinstance(rec, dict) and rec.get("path"):
+        st["file"] = dict(rec)
+        st.pop("file_removed", None)
 
 
 class Delivery:

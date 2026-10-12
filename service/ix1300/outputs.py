@@ -18,6 +18,7 @@ import random
 import re
 import socket
 import ssl
+import stat
 import threading
 import time
 import uuid
@@ -251,6 +252,7 @@ class Output:
         self.last_error = None
         self.last_permanent = False
         self.last_reply = None
+        self.last_file = None             # a dict (path, size, ino): the file that the last send wrote
 
     @classmethod
     def validate(cls, cfg):
@@ -294,7 +296,7 @@ class Output:
 
     def attempt(self, doc):
         """One send. Return True on success. Else last_error and last_permanent tell why."""
-        self.last_error, self.last_permanent = None, False
+        self.last_error, self.last_permanent, self.last_file = None, False, None
         try:
             self.last_reply = self.send(doc)
             log.info("output %s: sent %s", self.name, doc.filename)
@@ -544,8 +546,17 @@ class PaperlessOutput(Output):
 
 
 class DirectoryOutput(Output):
-    """Write the PDF into a directory. An existing file is never replaced."""
-    KEYS = Output.KEYS | {"path", "file_mode", "dir_mode"}
+    """Write the PDF into a directory. An existing file is never replaced.
+
+    keep = "always": the file stays. keep = "until_sent": the service deletes the file
+    when all other outputs of the job have the document (Service._remove_copies).
+    """
+    KEYS = Output.KEYS | {"path", "file_mode", "dir_mode", "keep"}
+    KEEP = ("always", "until_sent")
+
+    def __init__(self, name, cfg, connection_factory=None):
+        super().__init__(name, cfg, connection_factory)
+        self.keep = cfg.get("keep", "always")
 
     @classmethod
     def validate(cls, cfg):
@@ -553,9 +564,52 @@ class DirectoryOutput(Output):
         for k in ("file_mode", "dir_mode"):
             if k in cfg:
                 _mode(cfg[k])
+        if cfg.get("keep", "always") not in cls.KEEP:
+            raise ValueError("keep must be %s" % " or ".join('"%s"' % k for k in cls.KEEP))
+
+    def folder(self):
+        return self.cfg.get("path") or "/data/out"
+
+    def remove_copy(self, rec, job_id=None):
+        """Delete the file of REC (a last_file dict from the manifest). Return True if it is deleted.
+
+        The file must be in the folder of this output (not in a subfolder) and have the same
+        inode and size as at the write. Else it stays. A file that is not there is not an error.
+        """
+        path = rec.get("path") if isinstance(rec, dict) else None
+        if not isinstance(path, str) or not path:
+            return False
+        name = os.path.basename(path)
+        if (not name or name.startswith(".")
+                or os.path.realpath(os.path.dirname(path)) != os.path.realpath(self.folder())):
+            log.warning("output %s: job %s: %s is not in %s: the file stays", self.name, job_id, path,
+                        self.folder())
+            return False
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            log.info("output %s: job %s: %s is not there (moved or deleted)", self.name, job_id, path)
+            return False
+        except OSError as e:
+            log.warning("output %s: job %s: cannot examine %s: %s", self.name, job_id, path, e.strerror or e)
+            return False
+        if not stat.S_ISREG(st.st_mode) or st.st_ino != rec.get("ino") or st.st_size != rec.get("size"):
+            log.warning("output %s: job %s: %s is not the file of the job (changed): the file stays",
+                        self.name, job_id, path)
+            return False
+        try:
+            os.remove(path)
+            sync_dir(os.path.dirname(path))
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            log.warning("output %s: job %s: cannot delete %s: %s", self.name, job_id, path, e.strerror or e)
+            return False
+        log.info("output %s: job %s: all other outputs have the document: %s deleted", self.name, job_id, path)
+        return True
 
     def send(self, doc):
-        path = self.cfg.get("path") or "/data/out"
+        path = self.folder()
         os.makedirs(path, mode=_mode(self.cfg.get("dir_mode", DIR_MODE)), exist_ok=True)
         mode = _mode(self.cfg.get("file_mode", FILE_MODE))
         name = safe_filename(doc.filename)
@@ -578,6 +632,11 @@ class DirectoryOutput(Output):
                     except FileExistsError:
                         continue
                 sync_dir(path)
+                try:
+                    st = os.stat(fn)
+                    self.last_file = {"path": fn, "size": st.st_size, "ino": st.st_ino}
+                except OSError:                       # no record: the file then stays
+                    self.last_file = None
                 return fn
             raise OutputError("no free file name for %s in %s" % (name, path))
         finally:
