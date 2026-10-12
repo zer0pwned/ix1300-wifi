@@ -191,6 +191,11 @@ url = "http://127.0.0.1:8080/scan"
 field = "file"                # name of the file field in the multipart body
 headers = { Authorization = "Bearer change-me" }
 fields = { source = "ix1300" }
+# An idempotency key in each upload. The receiver then keeps only one copy of a document
+# that the service sends again. "sha256" (default): the hex SHA-256 of the PDF.
+# "job_id": the job ID. Do not put the same header name in headers.
+# idempotency_header = "Idempotency-Key"
+# idempotency_value = "sha256"   # or "job_id"
 
 [outputs.local]
 type = "directory"

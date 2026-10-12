@@ -568,6 +568,8 @@ url = "https://example.com/scan"
 field = "file"                                   # the name of the file field
 headers = { Authorization = "Bearer change-me" }
 fields = { source = "ix1300" }
+# idempotency_header = "Idempotency-Key"         # "" (default): no idempotency key
+# idempotency_value = "sha256"                   # or "job_id"
 ```
 
 The service sends a multipart POST request to `url`. The PDF is in the field
@@ -587,6 +589,21 @@ The service sends a multipart POST request to `url`. The PDF is in the field
 
 The values in `fields` are added to the request. `headers` adds HTTP headers,
 for example a token.
+
+Some receivers need an idempotency key in each upload (for example the header
+`Idempotency-Key`). Set `idempotency_header` to the name of that header. The
+key is the same for each attempt of a document. Thus the receiver keeps only
+one copy if the service sends the document again. `idempotency_value` sets the
+key:
+
+| Value | Key |
+|---|---|
+| `sha256` (default) | The SHA-256 of the PDF (64 lowercase hexadecimal characters) |
+| `job_id` | The job ID |
+
+Do not put the same header name in `headers`: the service does not start with
+this configuration. The service also refuses the names that it sets itself
+(for example `Content-Type` and `X-Ix1300-Job`).
 
 ### 6.3 Paperless-ngx (`type = "paperless"`)
 
@@ -648,11 +665,14 @@ request has the job ID (the header `X-Ix1300-Job`, and the webhook field
 `job_id`), so that a receiver can find copies. Paperless can find duplicates by
 their checksum.
 
-The logs do not show tokens, header values, or the reply text. For Paperless,
-the log and the job record keep only the task ID of the reply. For a webhook,
-the job record keeps the first 200 characters of the reply. The service
-removes the tokens and header values from the full reply before it cuts the
-text.
+The logs do not show tokens or header values. For Paperless, the log and the
+job record keep only the task ID of a successful reply. For a webhook, the job
+record keeps the first 200 characters of a successful reply. If the receiver
+sends an HTTP error (status 400 or more), the log line and the job record show
+the first 200 characters of its reply, for example
+`HTTP 400: {"error": "idempotency_key_required"}`. This applies to the webhook
+and to Paperless. The service removes the tokens and header values from the
+full reply before it cuts the text.
 
 ---
 
@@ -1260,7 +1280,7 @@ Refer to section 5.1.
 |---|---|
 | All | `type`, `retries`, `retry_delay`, `timeout`, `max_time`, `verify_tls` (section 6.4) |
 | `directory` | `path`, `file_mode`, `dir_mode`, `keep` (`always` or `until_sent`) (section 6.1) |
-| `webhook` | `url`, `field`, `headers`, `fields` (section 6.2) |
+| `webhook` | `url`, `field`, `headers`, `fields`, `idempotency_header`, `idempotency_value` (`sha256` or `job_id`) (section 6.2) |
 | `paperless` | `url`, `token`, `tags`, `receipt_tags`, `correspondent`, `receipt_correspondent`, `document_type`, `receipt_document_type`, `warning_title_suffix` (section 6.3) |
 
 ---

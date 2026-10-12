@@ -8,6 +8,7 @@ can find copies.
 In the service, each output has its own OutputQueue (a thread and a list of
 due times): a slow or failing output delays only its own documents.
 """
+import hashlib
 import heapq
 import http.client
 import json
@@ -61,6 +62,8 @@ class Body:
 
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 _TASK_ID = re.compile(r"[0-9A-Za-z-]{1,64}\Z")
+_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")      # an HTTP header name (RFC 9110 token)
+_VISIBLE = re.compile(r"[\x21-\x7e]{1,200}\Z")              # an idempotency key: 1 to 200 visible ASCII
 
 
 def _quote(value):
@@ -195,9 +198,11 @@ def http_post(url, body, headers, timeout=60.0, verify_tls=True, max_time=None, 
         conn.close()
 
 
-def _status_error(status):
-    """OutputError for a status that is not 2xx. 4xx (not 408/429) is permanent."""
-    return OutputError("HTTP %d" % status, permanent=400 <= status < 500 and status not in (408, 429))
+def _status_error(status, detail=""):
+    """OutputError for a status that is not 2xx. 4xx (not 408/429) is permanent.
+    DETAIL: a short text of the reply, with no secrets (Output.error_text)."""
+    return OutputError("HTTP %d" % status + (": " + detail if detail else ""),
+                       permanent=400 <= status < 500 and status not in (408, 429))
 
 
 def _ids(v):
@@ -285,6 +290,11 @@ class Output:
     def reply_text(self, reply):
         """The reply of the receiver for the manifest: no secrets, at most 200 characters."""
         return self.redact(bytes(reply).decode("utf-8", "replace").strip(), 200)
+
+    def error_text(self, reply):
+        """A short part of a failed reply for the log and the manifest: no secrets, at most
+        200 characters. The secrets go out of the full text before the cut (redact)."""
+        return self.redact(bytes(reply or b"").decode("utf-8", "replace").strip(), 200).strip()
 
     def _post(self, url, body, headers, default_timeout):
         return http_post(url, body, headers, float(self.cfg.get("timeout", default_timeout)),
@@ -425,9 +435,24 @@ def _job_headers(doc):
     return {"X-Ix1300-Job": jid} if jid else {}
 
 
+def _sha256(doc):
+    """The lowercase hex SHA-256 of the PDF of DOC. It reads the same chunks as the request body."""
+    h = hashlib.sha256()
+    for chunk in doc.chunks():
+        h.update(chunk)
+    return h.hexdigest()
+
+
 class WebhookOutput(Output):
-    """Multipart POST with the PDF and some form fields."""
-    KEYS = Output.KEYS | {"url", "field", "headers", "fields"}
+    """Multipart POST with the PDF and some form fields.
+
+    idempotency_header (for example "Idempotency-Key") adds a key to each request. The key
+    is the same for each attempt of a document: "sha256" (the hex SHA-256 of the PDF) or
+    "job_id" (the job ID).
+    """
+    KEYS = Output.KEYS | {"url", "field", "headers", "fields", "idempotency_header", "idempotency_value"}
+    IDEMPOTENCY_VALUES = ("sha256", "job_id")
+    RESERVED = ("content-type", "content-length", "host", "transfer-encoding", "user-agent", "x-ix1300-job")
 
     @classmethod
     def validate(cls, cfg):
@@ -437,6 +462,30 @@ class WebhookOutput(Output):
         _text_map(cfg, "fields")
         if _CTRL.search(str(cfg.get("field", "file"))):
             raise ValueError("field: control character")
+        name = cfg.get("idempotency_header", "")
+        if not isinstance(name, str):
+            raise ValueError("idempotency_header must be a text")
+        if cfg.get("idempotency_value", "sha256") not in cls.IDEMPOTENCY_VALUES:
+            raise ValueError("idempotency_value must be %s" % " or ".join('"%s"' % v for v in cls.IDEMPOTENCY_VALUES))
+        if not name:
+            return
+        if not _TOKEN.match(name):
+            raise ValueError("idempotency_header: %r is not a header name (letters, digits and !#$%%&'*+-.^_`|~)"
+                             % name)
+        if name.lower() in cls.RESERVED:
+            raise ValueError("idempotency_header: the service sets the header %s itself" % name)
+        if any(str(k).strip().lower() == name.lower() for k in (cfg.get("headers") or {})):
+            raise ValueError("idempotency_header: the header %s is also in headers: remove one of the two" % name)
+
+    def idempotency_key(self, doc):
+        """The value of the idempotency header for DOC. The same document gives the same value."""
+        if self.cfg.get("idempotency_value", "sha256") == "job_id":
+            jid = getattr(doc, "job_id", None)
+            if not isinstance(jid, str) or not _VISIBLE.match(jid):
+                raise OutputError("idempotency_value = \"job_id\": the job ID is empty, longer than 200 "
+                                  "characters or has a character that is not visible ASCII", permanent=True)
+            return jid
+        return _sha256(doc)
 
     def secrets(self):
         u = urlsplit(self.cfg.get("url") or "")
@@ -462,9 +511,11 @@ class WebhookOutput(Output):
         headers = {"Content-Type": ctype}
         headers.update(_job_headers(doc))
         headers.update({str(k): str(v) for k, v in (self.cfg.get("headers") or {}).items()})
+        if self.cfg.get("idempotency_header"):
+            headers[self.cfg["idempotency_header"]] = self.idempotency_key(doc)
         status, resp = self._post(url, body, headers, 60)
         if not 200 <= status < 300:
-            raise _status_error(status)
+            raise _status_error(status, self.error_text(resp))
         return resp
 
 
@@ -540,7 +591,7 @@ class PaperlessOutput(Output):
         headers.update(_job_headers(doc))
         status, resp = self._post(base + "/api/documents/post_document/", body, headers, 120)
         if not 200 <= status < 300:
-            raise _status_error(status)
+            raise _status_error(status, self.error_text(resp))
         log.info("paperless task %s", self.reply_text(resp))
         return resp
 
