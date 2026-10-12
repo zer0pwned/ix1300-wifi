@@ -153,6 +153,20 @@ class SelectionTest(unittest.TestCase):
             pages = pl.pages(r, profile(duplex=False, paper_face=face))
             self.assertEqual([(p.sheet, p.side) for p in pages], [(0, "front"), (1, "back")], face)
 
+    def test_simplex_side_up_takes_the_face_up_side(self):
+        # A Target receipt: the face-up (front) side has the receipt, the back has more print.
+        self.need_decoder()
+        pl = PL.Pipeline(dict(C.DEFAULTS["pipeline"], rotate=0))
+        r = ScanResult(sheets=2, sides=[side(0, "front", "text"), side(0, "back", "text"),
+                                        side(1, "front", "blank"), side(1, "back", "text")])
+        pages = pl.pages(r, profile(duplex=False, side="up"))
+        self.assertEqual([(p.sheet, p.side) for p in pages], [(0, "front"), (1, "front")])
+        self.assertTrue(any("face-up side looks blank" in e for e in pages[1].errors))
+        pages = pl.pages(r, profile(duplex=False, side="down"))
+        self.assertEqual([(p.sheet, p.side) for p in pages], [(0, "back"), (1, "back")])
+        with self.assertRaises(C.ConfigError):
+            profile(side="left")
+
     def test_simplex_without_decoder_uses_order(self):
         old = PL.Image, os.environ.get("IX1300_DJPEG")
         PL.Image = None

@@ -232,6 +232,9 @@ outputs = ["paperless"]       # empty: all outputs
 dpi = 300
 color = "auto"
 duplex = false
+# The side that faces up in the scanner (load the receipt face up). "auto" takes the
+# side with more print, which is wrong for receipts with print on the back.
+side = "up"
 blank_skip = true
 # Long page mode for long receipts: up to 3,000 mm, top chute only, dpi 150..300.
 # A sheet in the front slot gets the automatic length (up to 895 mm), with a warning.

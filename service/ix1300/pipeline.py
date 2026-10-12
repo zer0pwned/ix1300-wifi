@@ -1302,7 +1302,8 @@ class Pipeline:
         """Choose the pages for the PDF.
 
         Simplex: for each sheet, the side with the higher ink ratio (paper_face
-        order if equal). Duplex: all sides that are not blank. If all chosen
+        order if equal). With profile.side "up" or "down": that side, also when it
+        looks blank (with a warning). Duplex: all sides that are not blank. If all chosen
         pages are blank, each sheet keeps its side with the most ink.
         A page without a measurement because a step failed (unknown()) is always
         kept: an unknown page never loses to a blank side.
@@ -1313,7 +1314,21 @@ class Pipeline:
         for p in pages:
             sheets.setdefault(p.sheet, []).append(p)
         best = {n: max(ps, key=self._ink) for n, ps in sheets.items()}      # max() keeps the first if equal
-        if not profile.duplex:
+        fixed = getattr(profile, "side", "auto") in ("up", "down")
+        if not profile.duplex and fixed:
+            # The side that faced up (or down) in the scanner: the front image is the side
+            # that faces up [HW]. No ink check: for example a receipt with print on its back.
+            want = "front" if profile.side == "up" else "back"
+            kept = []
+            for n in sorted(sheets):
+                p = next((q for q in sheets[n] if q.side == want), best[n])
+                if p.blank:
+                    msg = ("sheet %d: the %s side looks blank: check the load direction"
+                           % (n + 1, "face-up" if profile.side == "up" else "face-down"))
+                    log.warning(msg)
+                    p.errors.append(msg)
+                kept.append(p)
+        elif not profile.duplex:
             kept = []
             for n in sorted(sheets):
                 ps = sheets[n]

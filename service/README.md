@@ -372,9 +372,15 @@ label. This setting is not tested on the scanner yet.
 ### 4.7 One side or two sides
 
 The scanner always reads both sides. With `duplex = false`, the service keeps
-only the side with more print. Thus the paper can face up or down. If the
-service cannot measure the print of a side, it keeps that side, with a
-warning.
+one side of each sheet. The profile setting `side` selects it:
+
+- `auto` (default): the side with more print. The paper can face up or down.
+  If the service cannot measure the print of a side, it keeps that side, with a
+  warning.
+- `up`: the side that faces up in the scanner, with no print check. The
+  example `receipt` profile uses this, because some receipts have more print on
+  the back.
+- `down`: the side that faces down.
 
 ### 4.8 Stop the service during a scan
 
@@ -433,8 +439,9 @@ A profile is a set of scan and PDF settings. Each profile is a table
 |---|---|---|
 | `dpi` | 150, 200, 300, 600 | 300 |
 | `color` | `auto`, `color`, `gray` | `auto` |
-| `duplex` | `true`: both sides. `false`: the side with more print | `true` |
-| `paper_face` | Page order only. `down`: back side first. `up`: front side first | `down` |
+| `duplex` | `true`: both sides. `false`: one side of each sheet (refer to `side`) | `true` |
+| `side` | With `duplex = false`: `auto` (the side with more print), `up` (the side that faces up in the scanner), `down` | `auto` |
+| `paper_face` | Page order only. `up`: front side first. `down`: back side first | `up` |
 | `length` | `auto` (up to 895 mm), `long` (up to 3,000 mm), or 10 to 895 (mm) | `auto` |
 | `blank_skip` | Remove blank sides | `true` |
 | `crop` | Cut the page to the paper: `auto` (receipts only), `true`, `false` | `auto` |
@@ -446,9 +453,15 @@ A profile is a set of scan and PDF settings. Each profile is a table
 | `title` | Title format for this profile (empty: `pipeline.title_format`) | empty |
 | `outputs` | Names of outputs. Empty list: all outputs | `[]` |
 
-Note: the example configuration sets `paper_face = "up"` in the `default`
-profile. If the pages of a two-sided document are in the wrong order, change
-this value.
+If the pages of a two-sided document are in the wrong order, change
+`paper_face`.
+
+The example configuration sets `side = "up"` in the `receipt` profile. Load
+each receipt with the printed receipt face up. Some receipts (for example from
+Target) have more print on the back than on the front, so `auto` can take the
+wrong side. With `up`, the service always takes the face-up side. If that side
+looks blank, the service keeps it and adds a warning ("check the load
+direction").
 
 ### 5.2 Separate outputs for each profile
 

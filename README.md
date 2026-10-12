@@ -139,8 +139,8 @@ cover to turn it on again. The service finds it again in a few seconds.
 
 - **Load only the sheets that you want to scan.** The scanner always takes
   the whole stack. It has no way to stop after a number of sheets.
-- **Receipts.** Use the top chute, not the front slot (the front slot takes
-  only short paper). Set the paper guides close to the receipt, and hold the
+- **Receipts.** Load each receipt face up (the printed receipt side up), in
+  the top chute, not the front slot (the front slot takes only short paper). Set the paper guides close to the receipt, and hold the
   end of a long receipt loosely so that it goes in straight.
 - **New features that wait for a test on real hardware:** receipts longer
   than about 90 cm, host registration over Wi-Fi, and double-feed detection

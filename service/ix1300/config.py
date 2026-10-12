@@ -128,6 +128,7 @@ PROFILE_DEFAULTS = {
     "crop": "auto",                     # auto (receipts), true, false: cut the page to the paper
     "ocr": None,
     "receipt": "auto",                  # auto, yes, no
+    "side": "auto",                     # simplex: auto (more print), up (face-up side), down
     "double_feed": True,                # double-feed detection (top chute)
     "title": "",
     "outputs": [],                      # empty: all outputs
@@ -448,6 +449,7 @@ class Profile:
     crop: object = "auto"
     ocr: object = None
     receipt: str = "auto"
+    side: str = "auto"                   # simplex: "auto" (the side with more print), "up", "down"
     title: str = ""
     outputs: List[str] = field(default_factory=list)
     double_feed: bool = True
@@ -484,7 +486,7 @@ def _check_profile_types(name, raw):
     if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                           or v != int(v)):
         raise ConfigError("profile %s: dpi: integer expected, got %r" % (name, v))
-    for k in ("color", "paper_face", "receipt", "title"):
+    for k in ("color", "paper_face", "receipt", "side", "title"):
         if k in raw and not isinstance(raw[k], str):
             raise ConfigError("profile %s: %s: text expected, got %r" % (name, k, raw[k]))
     outs = raw.get("outputs")
@@ -506,7 +508,7 @@ def _profile(name, raw):
                        rotate=p["rotate"], deskew=None if p["deskew"] is None else _bool(p["deskew"], "deskew"),
                        crop="auto" if str(p["crop"]).lower() == "auto" else _bool(p["crop"], "crop"),
                        ocr=None if p["ocr"] is None else _bool(p["ocr"], "ocr"),
-                       receipt=str(p["receipt"]).lower(),
+                       receipt=str(p["receipt"]).lower(), side=str(p["side"]).lower(),
                        title=str(p["title"]), outputs=list(p["outputs"] or []),
                        double_feed=_bool(p["double_feed"], "double_feed"))
     except (TypeError, ValueError) as e:
@@ -519,6 +521,8 @@ def _profile(name, raw):
         raise ConfigError("profile %s: paper_face must be down or up" % name)
     if prof.receipt not in ("auto", "yes", "no"):
         raise ConfigError("profile %s: receipt must be auto, yes or no" % name)
+    if prof.side not in ("auto", "up", "down"):
+        raise ConfigError("profile %s: side must be auto, up or down" % name)
     try:
         prof.rotate = _rotation(prof.rotate, allow_none=True)
     except ValueError as e:
