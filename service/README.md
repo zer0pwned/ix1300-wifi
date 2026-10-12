@@ -599,7 +599,9 @@ that sorts or names the documents without a look into the PDF:
 Some receivers need an idempotency key in each upload (for example the header
 `Idempotency-Key`). Set `idempotency_header` to the name of that header. The
 key is the same for each attempt of a document. Thus the receiver keeps only
-one copy if the service sends the document again. `idempotency_value` sets the
+one copy if the service sends the document again. Each attempt of a document
+also sends the same bytes, so a receiver that compares the full request (for
+example Reflow) also accepts a retry. `idempotency_value` sets the
 key:
 
 | Value | Key |

@@ -60,6 +60,23 @@ class IdempotencyKeyTest(unittest.TestCase):
         self.assertEqual(keys[0], keys[1])
         self.assertEqual(keys[0], hashlib.sha256(data).hexdigest())
 
+    def test_retry_sends_the_same_bytes(self):
+        # A receiver can compare the full request of an idempotent retry (Reflow: 422
+        # idempotency_key_reuse for "another request"). Each attempt of a job sends the same body.
+        with FakeServer(status=503) as srv:
+            out = hook(srv.url, idempotency_header="Idempotency-Key", fields={"source": "scanner"},
+                       standard_fields=True)
+            d = doc()
+            self.assertFalse(out.attempt(d))
+            srv.rec.status = 200
+            self.assertTrue(out.attempt(d))
+            other = doc(job_id="20261011-000000-aaaaaa")
+            self.assertTrue(out.attempt(other))
+            r = srv.rec.requests
+        self.assertEqual(r[0]["body"], r[1]["body"])
+        self.assertEqual(r[0]["headers"]["Content-Type"], r[1]["headers"]["Content-Type"])
+        self.assertNotEqual(r[0]["headers"]["Content-Type"], r[2]["headers"]["Content-Type"])
+
     def test_job_id_value(self):
         with FakeServer() as srv:
             out = hook(srv.url, idempotency_header="Idempotency-Key", idempotency_value="job_id")

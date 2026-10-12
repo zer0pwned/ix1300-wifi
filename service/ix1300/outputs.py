@@ -74,14 +74,20 @@ def _quote(value):
     return '"%s"' % v.replace("\\", "\\\\").replace('"', "%22").replace("\r", "%0D").replace("\n", "%0A")
 
 
-def multipart(fields, files):
+def multipart(fields, files, key=None):
     """Make a multipart/form-data body.
 
     fields: list of (name, value). files: list of (name, filename, content type, data),
     where data is bytes or an object with "size" and "chunks()" (a Document).
+    KEY (for example the job ID) gives a fixed boundary: each attempt for the same
+    document then sends the same bytes (receivers that compare idempotent requests).
+    Without KEY, the boundary is random.
     Return (Body, content type header).
     """
-    boundary = "ix1300-" + uuid.uuid4().hex
+    if key:
+        boundary = "ix1300-" + hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:32]
+    else:
+        boundary = "ix1300-" + uuid.uuid4().hex
     parts = []
     head = bytearray()
     for name, value in fields:
@@ -515,7 +521,8 @@ class WebhookOutput(Output):
                 fields.append(("warnings", json.dumps(doc.warnings)))
         for k, v in (self.cfg.get("fields") or {}).items():
             fields.append((k, v))
-        body, ctype = multipart(fields, [(self.cfg.get("field", "file"), doc.filename, "application/pdf", doc)])
+        body, ctype = multipart(fields, [(self.cfg.get("field", "file"), doc.filename, "application/pdf", doc)],
+                                key=getattr(doc, "job_id", None))
         headers = {"Content-Type": ctype}
         headers.update(_job_headers(doc))
         headers.update({str(k): str(v) for k, v in (self.cfg.get("headers") or {}).items()})
