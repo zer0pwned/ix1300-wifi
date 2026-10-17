@@ -37,10 +37,6 @@ Each item needs the scanner and some paper.
 2. **Emulator default for E6.** A new scanner gives `00 00` (no value set).
    The emulator gives `10 1E`.
 
-## For the owner of the repository
-
-1. Make the GitHub repository public when you are ready.
-
 ## Not planned
 
 - Wi-Fi setup without a USB cable.
